@@ -32,6 +32,25 @@ pub struct Settings {
     pub speed: f64,
     /// Loop transition in seconds: 0 = seamless hand-off, > 0 = crossfade
     pub loop_fade: f64,
+    /// Picture adjustments, 0.0 ..= 100.0
+    pub grayscale: f64,
+    pub sepia: f64,
+    /// Sharpening strength, 0.0 ..= 100.0
+    pub sharpen: f64,
+    /// Film grain, scanlines and tint strength, 0.0 ..= 100.0
+    pub grain: f64,
+    pub scanlines: f64,
+    pub tint_color: String,
+    pub tint_strength: f64,
+    /// High-quality resampling (anti-aliasing when the video is scaled down).
+    pub smooth_scaling: bool,
+    /// "cover" (fill, crop), "contain" (fit, bars) or "fill" (stretch)
+    pub fit: String,
+    /// Hardware options. They are read when the app starts (see `webview_args`).
+    pub gpu_acceleration: bool,
+    pub hw_video_decode: bool,
+    /// "compatible", "balanced" or "maximum"
+    pub gpu_profile: String,
 }
 
 impl Default for Settings {
@@ -51,6 +70,18 @@ impl Default for Settings {
             vignette: 0.0,
             speed: 1.0,
             loop_fade: 0.0,
+            grayscale: 0.0,
+            sepia: 0.0,
+            sharpen: 0.0,
+            grain: 0.0,
+            scanlines: 0.0,
+            tint_color: "#ffa65c".into(),
+            tint_strength: 0.0,
+            smooth_scaling: false,
+            fit: "cover".into(),
+            gpu_acceleration: true,
+            hw_video_decode: true,
+            gpu_profile: "maximum".into(),
         }
     }
 }
@@ -92,6 +123,63 @@ pub fn load(app: &AppHandle) -> Settings {
         .unwrap_or_default()
 }
 
+/// Reads `settings.json` before Tauri exists. WebView2 takes its flags when the
+/// first webview starts, which is before the app handle (and its path API) is
+/// available, so the file is found the same way `app_config_dir` does on Windows:
+/// `%APPDATA%\<identifier>`.
+#[allow(dead_code)]
+pub fn load_early(identifier: &str) -> Settings {
+    std::env::var_os("APPDATA")
+        .map(|d| PathBuf::from(d).join(identifier).join("settings.json"))
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Command-line flags for WebView2, chosen from the hardware options.
+///
+/// * Autoplay is always allowed: a wallpaper can't be clicked.
+/// * Occlusion tracking is always off. A wallpaper sits behind every window, so
+///   Chromium would treat it as hidden and throttle it; pausing is done by the
+///   app itself (see monitor.rs).
+/// * "compatible" adds nothing else, "balanced" adds GPU rasterisation and
+///   zero-copy uploads, "maximum" also ignores Chromium's GPU driver blocklist.
+#[allow(dead_code)]
+pub fn webview_args(s: &Settings) -> String {
+    let mut args: Vec<&str> = vec!["--autoplay-policy=no-user-gesture-required"];
+    let mut enable: Vec<&str> = Vec::new();
+    let disable: Vec<&str> = vec!["CalculateNativeWinOcclusion"];
+
+    if !s.gpu_acceleration {
+        args.push("--disable-gpu");
+    } else {
+        if s.hw_video_decode {
+            enable.push("PlatformHEVCDecoderSupport"); // HEVC needs GPU/OS support
+        } else {
+            args.push("--disable-accelerated-video-decode");
+        }
+        if s.gpu_profile != "compatible" {
+            args.push("--enable-gpu-rasterization");
+            args.push("--enable-zero-copy");
+        }
+        if s.gpu_profile == "maximum" {
+            args.push("--ignore-gpu-blocklist");
+        }
+    }
+
+    args.push("--disable-background-timer-throttling");
+    args.push("--disable-renderer-backgrounding");
+    args.push("--disable-backgrounding-occluded-windows");
+
+    let enable = format!("--enable-features={}", enable.join(","));
+    let disable = format!("--disable-features={}", disable.join(","));
+    if enable != "--enable-features=" {
+        args.push(&enable);
+    }
+    args.push(&disable);
+    args.join(" ")
+}
+
 fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let path = settings_path(app)?;
     if let Some(dir) = path.parent() {
@@ -130,6 +218,25 @@ pub fn set_settings(
     settings.vignette = settings.vignette.clamp(0.0, 100.0);
     settings.speed = settings.speed.clamp(0.25, 2.0);
     settings.loop_fade = settings.loop_fade.clamp(0.0, 3.0);
+    settings.grayscale = settings.grayscale.clamp(0.0, 100.0);
+    settings.sepia = settings.sepia.clamp(0.0, 100.0);
+    settings.sharpen = settings.sharpen.clamp(0.0, 100.0);
+    settings.grain = settings.grain.clamp(0.0, 100.0);
+    settings.scanlines = settings.scanlines.clamp(0.0, 100.0);
+    settings.tint_strength = settings.tint_strength.clamp(0.0, 100.0);
+    let hex = settings.tint_color.strip_prefix('#').unwrap_or("");
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        settings.tint_color = Settings::default().tint_color;
+    }
+    if !matches!(settings.fit.as_str(), "cover" | "contain" | "fill") {
+        settings.fit = Settings::default().fit;
+    }
+    if !matches!(
+        settings.gpu_profile.as_str(),
+        "compatible" | "balanced" | "maximum"
+    ) {
+        settings.gpu_profile = Settings::default().gpu_profile;
+    }
 
     if let Some(path) = &settings.video_path {
         if !std::path::Path::new(path).is_file() {
@@ -202,5 +309,30 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
     {
         let _ = (app, enabled);
         Err("Start with Windows is only available on Windows.".into())
+    }
+}
+
+/// Restarts the app, e.g. to apply hardware options.
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    app.restart();
+}
+
+/// Opens Windows "Graphics" settings, where a GPU can be chosen per program.
+#[tauri::command]
+pub fn open_graphics_settings() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("explorer.exe")
+            .arg("ms-settings:display-advanced-graphics")
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Graphics settings are only available on Windows.".into())
     }
 }

@@ -21,6 +21,23 @@ export interface Settings {
   speed: number;
   /** seconds, 0 = seamless hand-off, > 0 = crossfade */
   loopFade: number;
+  /** 0..100 */
+  grayscale: number;
+  sepia: number;
+  /** Sharpening strength, 0..100 */
+  sharpen: number;
+  /** Film grain, scanlines and tint strength, 0..100 */
+  grain: number;
+  scanlines: number;
+  tintColor: string;
+  tintStrength: number;
+  /** High-quality resampling through a canvas (less aliasing when scaled down). */
+  smoothScaling: boolean;
+  fit: "cover" | "contain" | "fill";
+  /** Hardware options, applied after a restart. */
+  gpuAcceleration: boolean;
+  hwVideoDecode: boolean;
+  gpuProfile: "compatible" | "balanced" | "maximum";
 }
 
 export interface RuntimeState {
@@ -44,6 +61,18 @@ export const DEFAULT_SETTINGS: Settings = {
   vignette: 0,
   speed: 1,
   loopFade: 0,
+  grayscale: 0,
+  sepia: 0,
+  sharpen: 0,
+  grain: 0,
+  scanlines: 0,
+  tintColor: "#ffa65c",
+  tintStrength: 0,
+  smoothScaling: false,
+  fit: "cover",
+  gpuAcceleration: true,
+  hwVideoDecode: true,
+  gpuProfile: "maximum",
 };
 
 export const FPS_OPTIONS = [
@@ -58,4 +87,16 @@ export const LOOP_OPTIONS = [
   { value: 0.5, label: "0.5 s fade" },
   { value: 1, label: "1 s fade" },
   { value: 2, label: "2 s fade" },
+];
+
+export const FIT_OPTIONS = [
+  { value: "cover", label: "Fill" },
+  { value: "contain", label: "Fit" },
+  { value: "fill", label: "Stretch" },
+];
+
+export const PROFILE_OPTIONS = [
+  { value: "compatible", label: "Compatible" },
+  { value: "balanced", label: "Balanced" },
+  { value: "maximum", label: "Maximum" },
 ];

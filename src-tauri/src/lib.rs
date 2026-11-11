@@ -31,34 +31,22 @@ fn open_settings(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+
     // WebView2 flags, shared by every webview (wallpaper + settings) because
-    // they are set through an environment variable.
-    // * Wallpapers can't be clicked, so audio may autoplay without a gesture.
-    // * HEVC hardware decoding is best-effort (needs GPU/OS support).
-    // * Use the GPU for rasterising and zero-copy uploads, even on drivers that
-    //   Chromium has on its blocklist (remove `--ignore-gpu-blocklist` if a
-    //   driver shows glitches).
-    // * A wallpaper sits behind every window, so Chromium would treat it as
-    //   occluded and throttle or stop it. Pausing is done by the app itself
-    //   (see monitor.rs), so these keep it running smoothly otherwise.
+    // they are set through an environment variable. They depend on the
+    // hardware options in settings.json, so they are read here, before the
+    // first webview starts (changing them needs a restart).
     #[cfg(windows)]
-    // SAFETY: runs first in `run()`, before any other thread is started.
-    unsafe {
-        std::env::set_var(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            [
-                "--autoplay-policy=no-user-gesture-required",
-                "--enable-features=PlatformHEVCDecoderSupport",
-                "--disable-features=CalculateNativeWinOcclusion",
-                "--ignore-gpu-blocklist",
-                "--enable-gpu-rasterization",
-                "--enable-zero-copy",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-                "--disable-backgrounding-occluded-windows",
-            ]
-            .join(" "),
-        );
+    {
+        let user = settings::load_early(&context.config().identifier);
+        // SAFETY: runs first in `run()`, before any other thread is started.
+        unsafe {
+            std::env::set_var(
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                settings::webview_args(&user),
+            );
+        }
     }
 
     let builder = tauri::Builder::default()
@@ -80,7 +68,9 @@ pub fn run() {
             settings::get_runtime,
             settings::pick_video,
             settings::get_autostart,
-            settings::set_autostart
+            settings::set_autostart,
+            settings::restart_app,
+            settings::open_graphics_settings
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -142,6 +132,6 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

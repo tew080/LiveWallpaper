@@ -12,6 +12,10 @@
     speed?: number;
     /** Loop transition in seconds. 0 = seamless hand-off to a pre-loaded copy, > 0 = crossfade. */
     loopFade?: number;
+    /** Draw through a canvas with high-quality resampling (less aliasing when the video is scaled down). */
+    smooth?: boolean;
+    /** cover = fill and crop, contain = fit with bars, fill = stretch. */
+    fit?: "cover" | "contain" | "fill";
     onstatus?: (ok: boolean, message?: string) => void;
   }
 
@@ -23,6 +27,8 @@
     paused = false,
     speed = 1,
     loopFade = 0,
+    smooth = false,
+    fit = "cover",
     onstatus,
   }: Props = $props();
 
@@ -33,7 +39,8 @@
   let a = $state<HTMLVideoElement>();
   let b = $state<HTMLVideoElement>();
   let canvas = $state<HTMLCanvasElement>();
-  const direct = $derived(fps === 0);
+  // The elements are shown directly only when no frame limit and no smoothing is wanted.
+  const direct = $derived(fps === 0 && !smooth);
 
   // Player state. Plain variables on purpose: it changes every frame and is
   // never rendered by Svelte.
@@ -214,6 +221,12 @@
     layout();
   });
 
+  // Redraw the canvas right away when the fit mode changes.
+  $effect(() => {
+    void fit;
+    paintNow?.();
+  });
+
   // Pause / resume (a paused <video> stops decoding, which is what saves power)
   $effect(() => {
     if (!a || !b) return;
@@ -234,10 +247,10 @@
     const x = a;
     const y = b;
     if (!x || !y) return;
-    const c = canvas;
-    const capped = fps > 0 && !!c;
-    const ctx = capped ? c!.getContext("2d", { alpha: false }) : null;
-    const interval = capped ? 1000 / fps : 0;
+    const c = canvas; // only exists when the video is drawn through the canvas
+    const capped = !!c;
+    const ctx = c ? c.getContext("2d", { alpha: false }) : null;
+    const interval = fps > 0 ? 1000 / fps : 0; // 0 = paint every video frame
     let nextDue = 0;
     let stopped = false;
     let raf = 0;
@@ -248,15 +261,28 @@
       const vw = v.videoWidth;
       const vh = v.videoHeight;
       if (!vw || !vh) return;
-      const scale = Math.max(c.width / vw, c.height / vh); // "cover"
-      const dw = vw * scale;
-      const dh = vh * scale;
+      let dw = c.width;
+      let dh = c.height;
+      if (fit !== "fill") {
+        const scale =
+          fit === "contain" ? Math.min(c.width / vw, c.height / vh) : Math.max(c.width / vw, c.height / vh);
+        dw = vw * scale;
+        dh = vh * scale;
+      }
+      // Context state is reset whenever the canvas is resized, so set it per draw.
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
       ctx.globalAlpha = alpha;
       ctx.drawImage(v, (c.width - dw) / 2, (c.height - dh) / 2, dw, dh);
     };
 
     const paint = () => {
-      if (!ctx) return;
+      if (!ctx || !c) return;
+      if (fit !== "cover") {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, c.width, c.height);
+      }
       draw(active(), 1);
       if (fading && mix > 0) draw(standby(), mix);
       ctx.globalAlpha = 1;
@@ -317,6 +343,7 @@
   bind:this={a}
   {src}
   class:direct
+  style:object-fit={fit}
   playsinline
   preload="auto"
   onloadeddata={() => onLoaded(a)}
@@ -328,6 +355,7 @@
   bind:this={b}
   {src}
   class:direct
+  style:object-fit={fit}
   playsinline
   preload="auto"
   onloadeddata={() => onLoaded(b)}

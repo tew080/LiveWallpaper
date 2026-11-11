@@ -2,18 +2,27 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { DEFAULT_SETTINGS, FPS_OPTIONS, LOOP_OPTIONS, type Settings } from "$lib/types";
+  import {
+    DEFAULT_SETTINGS,
+    FIT_OPTIONS,
+    FPS_OPTIONS,
+    LOOP_OPTIONS,
+    PROFILE_OPTIONS,
+    type Settings,
+  } from "$lib/types";
 
   const TABS = [
     { id: "wallpaper", label: "Wallpaper" },
     { id: "picture", label: "Picture" },
+    { id: "effects", label: "Effects" },
     { id: "performance", label: "Performance" },
     { id: "general", label: "General" },
   ] as const;
   type Tab = (typeof TABS)[number]["id"];
 
-  const PICTURE_KEYS = ["brightness", "contrast", "saturation", "hue", "blur", "vignette"] as const;
-  type NumKey = (typeof PICTURE_KEYS)[number] | "volume" | "speed";
+  const PICTURE_KEYS = ["brightness", "contrast", "saturation", "hue", "grayscale", "sepia", "blur"] as const;
+  const EFFECT_KEYS = ["sharpen", "grain", "scanlines", "vignette", "tintStrength"] as const;
+  type NumKey = (typeof PICTURE_KEYS)[number] | (typeof EFFECT_KEYS)[number] | "volume" | "speed";
 
   let tab = $state<Tab>("wallpaper");
   let s = $state<Settings>({ ...DEFAULT_SETTINGS });
@@ -23,6 +32,14 @@
   let timer: ReturnType<typeof setTimeout> | undefined;
   let autostart = $state(false);
   let autostartError = $state<string | null>(null);
+  // Hardware options as they were when the app started; they only apply after a restart.
+  let applied = $state<{ gpu: boolean; decode: boolean; profile: string } | null>(null);
+  const restartNeeded = $derived(
+    applied !== null &&
+      (applied.gpu !== s.gpuAcceleration ||
+        applied.decode !== s.hwVideoDecode ||
+        applied.profile !== s.gpuProfile),
+  );
 
   const fileName = $derived(s.videoPath?.split(/[\\/]/).pop() ?? null);
 
@@ -69,6 +86,15 @@
     for (const k of PICTURE_KEYS) s[k] = DEFAULT_SETTINGS[k];
     save(true);
   }
+
+  function resetEffects() {
+    for (const k of EFFECT_KEYS) s[k] = DEFAULT_SETTINGS[k];
+    s.tintColor = DEFAULT_SETTINGS.tintColor;
+    save(true);
+  }
+
+  const run = (command: string) =>
+    invoke(command).catch((e) => (status = { ok: false, message: String(e) }));
 
   async function setAutostart(input: HTMLInputElement) {
     try {
@@ -138,7 +164,10 @@
     let disposed = false;
     let off: (() => void) | undefined;
 
-    invoke<Settings>("get_settings").then((v) => (s = v));
+    invoke<Settings>("get_settings").then((v) => {
+      s = v;
+      applied = { gpu: v.gpuAcceleration, decode: v.hwVideoDecode, profile: v.gpuProfile };
+    });
     invoke<boolean>("get_autostart").then((v) => (autostart = v));
     listen<{ ok: boolean; message?: string }>("wallpaper:status", (e) => {
       status = e.payload.ok && !e.payload.message ? null : e.payload;
@@ -224,9 +253,9 @@
 {#snippet segmented(
   name: string,
   label: string,
-  options: { value: number; label: string }[],
-  current: number,
-  pick: (value: number) => void,
+  options: { value: number | string; label: string }[],
+  current: number | string,
+  pick: (value: any) => void,
 )}
   <div class="seg" role="radiogroup" aria-label={label}>
     {#each options as o (o.value)}
@@ -284,6 +313,23 @@
         {/if}
       </div>
 
+      <h2 class="cap">Display</h2>
+      <div class="card">
+        <div class="row stack">
+          <div class="lbl">
+            <div class="t">Fit to screen</div>
+            <div class="d">
+              Fill crops the edges so there are no bars, Fit shows the whole video with bars, and
+              Stretch distorts it to the screen shape.
+            </div>
+          </div>
+          {@render segmented("fit", "Fit to screen", FIT_OPTIONS, s.fit, (v) => {
+            s.fit = v;
+            save(true);
+          })}
+        </div>
+      </div>
+
       <h2 class="cap">Playback</h2>
       <div class="card">
         <div class="row stack">
@@ -317,8 +363,9 @@
         {@render slider("contrast", "Contrast", 50, 200, 1, "%")}
         {@render slider("saturation", "Saturation", 0, 200, 1, "%")}
         {@render slider("hue", "Hue", -180, 180, 1, "°")}
+        {@render slider("grayscale", "Grayscale", 0, 100, 1, "%")}
+        {@render slider("sepia", "Sepia", 0, 100, 1, "%")}
         {@render slider("blur", "Blur", 0, 20, 0.5, " px")}
-        {@render slider("vignette", "Vignette", 0, 100, 1, "%")}
         <div class="row actions">
           <button class="btn" onclick={resetPicture}>Reset picture</button>
         </div>
@@ -326,6 +373,56 @@
       <p class="note">
         Changes apply live. Double-click a slider to reset just that one. Adjustments are done by
         the GPU; blur is the most expensive, so keep it low on weaker graphics cards.
+      </p>
+    {:else if tab === "effects"}
+      <h2 class="cap">Image quality</h2>
+      <div class="card">
+        {@render toggle(
+          "smooth",
+          "Smooth scaling",
+          "Anti-aliasing for scaled video: resamples with a higher-quality filter, which removes jagged edges and shimmer when the video is larger than the screen. Costs a little extra GPU.",
+          s.smoothScaling,
+          (v) => {
+            s.smoothScaling = v;
+            save(true);
+          },
+        )}
+        {@render slider("sharpen", "Sharpness", 0, 100, 1, "%")}
+      </div>
+      <p class="note">
+        Video can't use the multisample anti-aliasing that games use, so smoothing here is done by
+        resampling. A little sharpness (10–30%) restores the crispness that smoothing softens.
+      </p>
+
+      <h2 class="cap">Effects</h2>
+      <div class="card">
+        {@render slider("grain", "Film grain", 0, 100, 1, "%")}
+        {@render slider("scanlines", "Scanlines", 0, 100, 1, "%")}
+        {@render slider("vignette", "Vignette", 0, 100, 1, "%")}
+        <div class="row">
+          <div class="lbl">
+            <label class="t" for="tint-color">Tint colour</label>
+            <div class="d">Colours the whole picture while keeping its light and dark.</div>
+          </div>
+          <input
+            id="tint-color"
+            class="color"
+            type="color"
+            value={s.tintColor}
+            oninput={(e) => {
+              s.tintColor = e.currentTarget.value;
+              save();
+            }}
+          />
+        </div>
+        {@render slider("tintStrength", "Tint strength", 0, 100, 1, "%")}
+        <div class="row actions">
+          <button class="btn" onclick={resetEffects}>Reset effects</button>
+        </div>
+      </div>
+      <p class="note">
+        Grain also hides banding in dark gradients. Effects are drawn by the GPU on top of the
+        wallpaper and pause together with it.
       </p>
     {:else if tab === "performance"}
       <h2 class="cap">Frame rate</h2>
@@ -368,6 +465,62 @@
             save(true);
           },
         )}
+      </div>
+
+      <h2 class="cap">Hardware options</h2>
+      <div class="card">
+        {@render toggle(
+          "gpu-accel",
+          "GPU acceleration",
+          "Turn off only if the wallpaper shows glitches. Everything is then drawn by the CPU.",
+          s.gpuAcceleration,
+          (v) => {
+            s.gpuAcceleration = v;
+            save(true);
+          },
+        )}
+        {@render toggle(
+          "hw-decode",
+          "Hardware video decoding",
+          "Lets the GPU decode the video, which uses far less power than the CPU.",
+          s.hwVideoDecode,
+          (v) => {
+            s.hwVideoDecode = v;
+            save(true);
+          },
+        )}
+        <div class="row stack">
+          <div class="lbl">
+            <div class="t">Graphics profile</div>
+            <div class="d">
+              Compatible is the safest. Balanced adds GPU drawing and zero-copy uploads. Maximum
+              also uses GPUs that the engine normally blocks because of old drivers.
+            </div>
+          </div>
+          {@render segmented("profile", "Graphics profile", PROFILE_OPTIONS, s.gpuProfile, (v) => {
+            s.gpuProfile = v;
+            save(true);
+          })}
+        </div>
+        <div class="row">
+          <div class="lbl">
+            <div class="t">Choose which GPU to use</div>
+            <div class="d">
+              Windows decides this per program. Add msedgewebview2.exe in Graphics settings to pick
+              a graphics card.
+            </div>
+          </div>
+          <button class="btn" onclick={() => run("open_graphics_settings")}>Open</button>
+        </div>
+        {#if restartNeeded}
+          <div class="row restart">
+            <div class="lbl">
+              <div class="t">Restart to apply</div>
+              <div class="d">Hardware options are read when LiveWallpaper starts.</div>
+            </div>
+            <button class="btn primary" onclick={() => run("restart_app")}>Restart now</button>
+          </div>
+        {/if}
       </div>
 
       <h2 class="cap">Graphics hardware</h2>
@@ -472,7 +625,7 @@
     gap: 4px;
   }
   .tabs button {
-    padding: 8px 12px 10px;
+    padding: 8px 10px 10px;
     border: 0;
     border-bottom: 2px solid transparent;
     background: none;
@@ -719,6 +872,20 @@
     border-radius: 50%;
     background: var(--accent);
     box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  .color {
+    flex: none;
+    width: 44px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface-2);
+    cursor: pointer;
+  }
+  .row.restart {
+    background: var(--surface-2);
   }
 
   /* ---- Hardware table ---- */
