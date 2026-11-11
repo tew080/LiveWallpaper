@@ -1,9 +1,13 @@
+mod settings;
 mod wallpaper;
+#[cfg(windows)]
+mod monitor;
 
+use settings::AppState;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Emitter, Manager,
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -12,12 +16,53 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+fn open_settings(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings".into()))
+        .title("LiveWallpaper settings")
+        .inner_size(480.0, 760.0)
+        .resizable(false)
+        .build();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Wallpapers can't be clicked, so allow audio to autoplay without a user
+    // gesture. HEVC hardware decoding is best-effort (needs GPU/OS support).
+    // Set via env var so every webview (wallpaper + settings) shares the same
+    // WebView2 environment arguments.
+    #[cfg(windows)]
+    // SAFETY: runs first in `run()`, before any other thread is started.
+    unsafe {
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--autoplay-policy=no-user-gesture-required --enable-features=PlatformHEVCDecoderSupport",
+        );
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            settings::get_settings,
+            settings::set_settings,
+            settings::get_runtime,
+            settings::pick_video
+        ])
         .setup(|app| {
+            let handle = app.handle().clone();
+
+            let initial = settings::load(&handle);
+            if let Some(path) = &initial.video_path {
+                let _ = app.asset_protocol_scope().allow_file(path);
+            }
+            app.manage(AppState::new(initial));
+
             let window = app
                 .get_webview_window("main")
                 .ok_or("window `main` not found")?;
@@ -31,15 +76,21 @@ pub fn run() {
 
             window.show()?;
 
-            // Tray menu: pause/resume + quit.
+            // Tray menu: settings, pause/resume, quit.
+            let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "toggle", "Pause / Resume", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&toggle, &quit])?;
+            let menu = Menu::with_items(app, &[&settings_item, &toggle, &quit])?;
 
             let mut tray = TrayIconBuilder::new()
                 .tooltip("LiveWallpaper")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
+                    "settings" => {
+                        let app = app.clone();
+                        // Build the window off the main thread to avoid a deadlock on Windows.
+                        std::thread::spawn(move || open_settings(&app));
+                    }
                     "toggle" => {
                         let _ = app.emit("wallpaper:toggle", ());
                     }
@@ -50,6 +101,9 @@ pub fn run() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+
+            #[cfg(windows)]
+            monitor::spawn(handle);
 
             Ok(())
         })

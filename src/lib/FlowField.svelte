@@ -59,7 +59,7 @@
     const frame = (now: number) => {
       raf = requestAnimationFrame(frame);
       if (paused) return;
-      if (now - last < 1000 / fps) return;
+      if (fps > 0 && now - last < 1000 / fps) return; // fps 0 = unlimited
       last = now;
       t = now;
 
