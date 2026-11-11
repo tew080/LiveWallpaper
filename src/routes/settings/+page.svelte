@@ -1,45 +1,67 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
+  import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
   import {
+    BATTERY_FPS_OPTIONS,
     DEFAULT_SETTINGS,
     FIT_OPTIONS,
     FPS_OPTIONS,
+    LANGUAGE_OPTIONS,
     LOOP_OPTIONS,
+    POWER_MODES,
+    PRESETS,
     PROFILE_OPTIONS,
     type Settings,
   } from "$lib/types";
+  import type { RendererInfo } from "$lib/gl";
+  import { setLanguage, t } from "$lib/i18n.svelte";
 
-  const TABS = [
-    { id: "wallpaper", label: "Wallpaper" },
-    { id: "picture", label: "Picture" },
-    { id: "effects", label: "Effects" },
-    { id: "performance", label: "Performance" },
-    { id: "general", label: "General" },
+  const TABS = ["wallpaper", "picture", "effects", "performance", "general"] as const;
+  type Tab = (typeof TABS)[number];
+
+  const PICTURE_KEYS = [
+    "brightness",
+    "contrast",
+    "saturation",
+    "hue",
+    "grayscale",
+    "sepia",
+    "blur",
+    "temperature",
   ] as const;
-  type Tab = (typeof TABS)[number]["id"];
+  const EFFECT_KEYS = ["sharpen", "grain", "scanlines", "vignette", "aberration", "pixelate", "tintStrength"] as const;
+  type NumKey =
+    | (typeof PICTURE_KEYS)[number]
+    | (typeof EFFECT_KEYS)[number]
+    | "volume"
+    | "speed"
+    | "renderScale";
 
-  const PICTURE_KEYS = ["brightness", "contrast", "saturation", "hue", "grayscale", "sepia", "blur"] as const;
-  const EFFECT_KEYS = ["sharpen", "grain", "scanlines", "vignette", "tintStrength"] as const;
-  type NumKey = (typeof PICTURE_KEYS)[number] | (typeof EFFECT_KEYS)[number] | "volume" | "speed";
+  type Gpu = { name: string; kind: string };
 
   let tab = $state<Tab>("wallpaper");
   let s = $state<Settings>({ ...DEFAULT_SETTINGS });
   let status = $state<{ ok: boolean; message?: string } | null>(null);
   let support = $state<{ name: string; playback: string; hardware: string }[]>([]);
   let gpu = $state<string | null>(null);
+  let gpus = $state<Gpu[] | null>(null);
+  let gpuError = $state<string | null>(null);
+  let renderer = $state<RendererInfo | null>(null);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let autostart = $state(false);
   let autostartError = $state<string | null>(null);
   // Hardware options as they were when the app started; they only apply after a restart.
-  let applied = $state<{ gpu: boolean; decode: boolean; profile: string } | null>(null);
+  let applied = $state<{ gpu: boolean; decode: boolean; profile: string; choice: string } | null>(null);
   const restartNeeded = $derived(
     applied !== null &&
       (applied.gpu !== s.gpuAcceleration ||
         applied.decode !== s.hwVideoDecode ||
-        applied.profile !== s.gpuProfile),
+        applied.profile !== s.gpuProfile ||
+        applied.choice !== s.gpuChoice),
   );
+
+  $effect(() => setLanguage(s.language));
 
   const fileName = $derived(s.videoPath?.split(/[\\/]/).pop() ?? null);
 
@@ -82,14 +104,44 @@
     save(true);
   }
 
+  function resetKeys(keys: readonly NumKey[]) {
+    for (const k of keys) s[k] = DEFAULT_SETTINGS[k];
+  }
+
   function resetPicture() {
-    for (const k of PICTURE_KEYS) s[k] = DEFAULT_SETTINGS[k];
+    resetKeys(PICTURE_KEYS);
     save(true);
   }
 
   function resetEffects() {
-    for (const k of EFFECT_KEYS) s[k] = DEFAULT_SETTINGS[k];
+    resetKeys(EFFECT_KEYS);
     s.tintColor = DEFAULT_SETTINGS.tintColor;
+    save(true);
+  }
+
+  const matches = (values: Partial<Settings>) =>
+    (Object.keys(values) as (keyof Settings)[]).every((k) => s[k] === values[k]);
+
+  function applyPreset(values: Partial<Settings>) {
+    resetKeys(PICTURE_KEYS);
+    resetKeys(EFFECT_KEYS);
+    s.tintColor = DEFAULT_SETTINGS.tintColor;
+    Object.assign(s, values);
+    save(true);
+  }
+
+  function applyPower(values: Partial<Settings>) {
+    Object.assign(s, values);
+    save(true);
+  }
+
+  const choiceFor = (g: Gpu) => (g.kind === "discrete" ? "performance" : "power");
+  // Two adapters of the same kind can't be told apart by Windows' preference; the first one is shown as chosen.
+  const isChosen = (g: Gpu, i: number) =>
+    s.gpuChoice === choiceFor(g) && (gpus ?? []).findIndex((x) => x.kind === g.kind) === i;
+
+  function chooseGpu(choice: Settings["gpuChoice"]) {
+    s.gpuChoice = choice;
     save(true);
   }
 
@@ -107,17 +159,32 @@
   }
 
   function onTabKey(e: KeyboardEvent) {
-    const i = TABS.findIndex((t) => t.id === tab);
+    const i = TABS.indexOf(tab);
     let n = i;
     if (e.key === "ArrowRight") n = (i + 1) % TABS.length;
     else if (e.key === "ArrowLeft") n = (i - 1 + TABS.length) % TABS.length;
     else return;
     e.preventDefault();
-    tab = TABS[n].id;
+    tab = TABS[n];
     queueMicrotask(() => document.getElementById(`tab-${tab}`)?.focus());
   }
 
   const fmt = (v: number) => String(Math.round(v * 100) / 100);
+  const answer = (v: string) => (v === "Yes" ? t("yes") : v === "No" ? t("no") : v === "Maybe" ? t("maybe") : v);
+
+  const rendererText = $derived.by(() => {
+    if (!renderer) return t("rend.waiting");
+    if (renderer.reason) return `${t("rend.css")} — ${renderer.reason}`;
+    return t(renderer.mode === "gl" ? "rend.gl" : renderer.mode === "canvas" ? "rend.canvas" : "rend.direct");
+  });
+  const noScaleHint = $derived(
+    !!renderer &&
+      renderer.mode === "gl" &&
+      s.smoothScaling &&
+      renderer.vw > 0 &&
+      renderer.vw <= renderer.cw * 1.01 &&
+      renderer.vh <= renderer.ch * 1.01,
+  );
 
   function gpuName(): string | null {
     try {
@@ -162,30 +229,38 @@
     if (!("__TAURI_INTERNALS__" in window)) return;
 
     let disposed = false;
-    let off: (() => void) | undefined;
+    const offs: UnlistenFn[] = [];
 
     invoke<Settings>("get_settings").then((v) => {
       s = v;
-      applied = { gpu: v.gpuAcceleration, decode: v.hwVideoDecode, profile: v.gpuProfile };
+      applied = { gpu: v.gpuAcceleration, decode: v.hwVideoDecode, profile: v.gpuProfile, choice: v.gpuChoice };
     });
     invoke<boolean>("get_autostart").then((v) => (autostart = v));
-    listen<{ ok: boolean; message?: string }>("wallpaper:status", (e) => {
-      status = e.payload.ok && !e.payload.message ? null : e.payload;
-    }).then((fn) => {
-      if (disposed) fn();
-      else off = fn;
+    invoke<Gpu[]>("list_gpus")
+      .then((v) => (gpus = v))
+      .catch((e) => (gpuError = String(e)));
+
+    Promise.all([
+      listen<{ ok: boolean; message?: string }>("wallpaper:status", (e) => {
+        status = e.payload.ok && !e.payload.message ? null : e.payload;
+      }),
+      listen<RendererInfo>("wallpaper:renderer", (e) => (renderer = e.payload)),
+    ]).then((fns) => {
+      if (disposed) fns.forEach((off) => off());
+      else offs.push(...fns);
+      emit("renderer:request").catch(() => {});
     });
 
     return () => {
       disposed = true;
-      off?.();
+      offs.forEach((off) => off());
       clearTimeout(timer);
     };
   });
 </script>
 
 <svelte:head>
-  <title>LiveWallpaper settings</title>
+  <title>{t("title")}</title>
 </svelte:head>
 
 {#snippet toggle(
@@ -253,7 +328,7 @@
 {#snippet segmented(
   name: string,
   label: string,
-  options: { value: number | string; label: string }[],
+  options: { value: number | string; key: string }[],
   current: number | string,
   pick: (value: any) => void,
 )}
@@ -261,7 +336,7 @@
     {#each options as o (o.value)}
       <label>
         <input type="radio" {name} value={o.value} checked={current === o.value} onchange={() => pick(o.value)} />
-        <span>{o.label}</span>
+        <span>{t(o.key)}</span>
       </label>
     {/each}
   </div>
@@ -270,19 +345,19 @@
 <div class="app">
   <header>
     <h1>LiveWallpaper</h1>
-    <div class="tabs" role="tablist" aria-label="Settings sections">
-      {#each TABS as t (t.id)}
+    <div class="tabs" role="tablist" aria-label={t("aria.tabs")}>
+      {#each TABS as id (id)}
         <button
           role="tab"
-          id="tab-{t.id}"
-          aria-selected={tab === t.id}
+          id="tab-{id}"
+          aria-selected={tab === id}
           aria-controls="panel"
-          tabindex={tab === t.id ? 0 : -1}
-          class:active={tab === t.id}
-          onclick={() => (tab = t.id)}
+          tabindex={tab === id ? 0 : -1}
+          class:active={tab === id}
+          onclick={() => (tab = id)}
           onkeydown={onTabKey}
         >
-          {t.label}
+          {t(`tab.${id}`)}
         </button>
       {/each}
     </div>
@@ -290,20 +365,20 @@
 
   <div class="panel" id="panel" role="tabpanel" aria-labelledby="tab-{tab}">
     {#if tab === "wallpaper"}
-      <h2 class="cap">Video</h2>
+      <h2 class="cap">{t("cap.video")}</h2>
       <div class="card">
         <div class="row">
           <div class="lbl">
-            <div class="t">Current wallpaper</div>
+            <div class="t">{t("wp.current")}</div>
             <div class="d file" title={s.videoPath ?? ""}>
-              {fileName ?? "No video chosen — showing the animated background."}
+              {fileName ?? t("wp.none")}
             </div>
           </div>
         </div>
         <div class="row actions">
-          <button class="btn primary" onclick={browse}>Choose video…</button>
+          <button class="btn primary" onclick={browse}>{t("wp.choose")}</button>
           {#if s.videoPath}
-            <button class="btn" onclick={clearVideo}>Use animated background</button>
+            <button class="btn" onclick={clearVideo}>{t("wp.useAnimated")}</button>
           {/if}
         </div>
         {#if status}
@@ -313,96 +388,113 @@
         {/if}
       </div>
 
-      <h2 class="cap">Display</h2>
+      <h2 class="cap">{t("cap.display")}</h2>
       <div class="card">
         <div class="row stack">
           <div class="lbl">
-            <div class="t">Fit to screen</div>
-            <div class="d">
-              Fill crops the edges so there are no bars, Fit shows the whole video with bars, and
-              Stretch distorts it to the screen shape.
-            </div>
+            <div class="t">{t("fit.title")}</div>
+            <div class="d">{t("fit.desc")}</div>
           </div>
-          {@render segmented("fit", "Fit to screen", FIT_OPTIONS, s.fit, (v) => {
+          {@render segmented("fit", t("fit.title"), FIT_OPTIONS, s.fit, (v) => {
             s.fit = v;
             save(true);
           })}
         </div>
       </div>
 
-      <h2 class="cap">Playback</h2>
+      <h2 class="cap">{t("cap.playback")}</h2>
       <div class="card">
         <div class="row stack">
           <div class="lbl">
-            <div class="t">Loop transition</div>
-            <div class="d">
-              Seamless hands over to a pre-loaded copy with no gap. A fade blends the end into the
-              start, which helps with videos that aren't made to loop.
-            </div>
+            <div class="t">{t("loop.title")}</div>
+            <div class="d">{t("loop.desc")}</div>
           </div>
-          {@render segmented("loop", "Loop transition", LOOP_OPTIONS, s.loopFade, (v) => {
+          {@render segmented("loop", t("loop.title"), LOOP_OPTIONS, s.loopFade, (v) => {
             s.loopFade = v;
             save(true);
           })}
         </div>
-        {@render slider("speed", "Speed", 0.25, 2, 0.05, "×")}
+        {@render slider("speed", t("speed"), 0.25, 2, 0.05, "×")}
       </div>
 
-      <h2 class="cap">Sound</h2>
+      <h2 class="cap">{t("cap.sound")}</h2>
       <div class="card">
-        {@render toggle("mute", "Mute", "", s.muted, (v) => {
+        {@render toggle("mute", t("mute"), "", s.muted, (v) => {
           s.muted = v;
           save(true);
         })}
-        {@render slider("volume", "Volume", 0, 100, 1, "%", 100, s.muted)}
+        {@render slider("volume", t("volume"), 0, 100, 1, "%", 100, s.muted)}
       </div>
     {:else if tab === "picture"}
-      <h2 class="cap">Adjustments</h2>
+      <h2 class="cap">{t("cap.adjustments")}</h2>
       <div class="card">
-        {@render slider("brightness", "Brightness", 20, 200, 1, "%")}
-        {@render slider("contrast", "Contrast", 50, 200, 1, "%")}
-        {@render slider("saturation", "Saturation", 0, 200, 1, "%")}
-        {@render slider("hue", "Hue", -180, 180, 1, "°")}
-        {@render slider("grayscale", "Grayscale", 0, 100, 1, "%")}
-        {@render slider("sepia", "Sepia", 0, 100, 1, "%")}
-        {@render slider("blur", "Blur", 0, 20, 0.5, " px")}
+        {@render slider("brightness", t("brightness"), 20, 200, 1, "%")}
+        {@render slider("contrast", t("contrast"), 50, 200, 1, "%")}
+        {@render slider("saturation", t("saturation"), 0, 200, 1, "%")}
+        {@render slider("hue", t("hue"), -180, 180, 1, "°")}
+        {@render slider("temperature", t("temperature"), -100, 100, 1, "")}
+        {@render slider("grayscale", t("grayscale"), 0, 100, 1, "%")}
+        {@render slider("sepia", t("sepia"), 0, 100, 1, "%")}
+        {@render slider("blur", t("blur"), 0, 20, 0.5, " px")}
         <div class="row actions">
-          <button class="btn" onclick={resetPicture}>Reset picture</button>
+          <button class="btn" onclick={resetPicture}>{t("pic.reset")}</button>
         </div>
       </div>
-      <p class="note">
-        Changes apply live. Double-click a slider to reset just that one. Adjustments are done by
-        the GPU; blur is the most expensive, so keep it low on weaker graphics cards.
-      </p>
+      <p class="note">{t("pic.note")}</p>
     {:else if tab === "effects"}
-      <h2 class="cap">Image quality</h2>
+      <h2 class="cap">{t("cap.renderer")}</h2>
       <div class="card">
-        {@render toggle(
-          "smooth",
-          "Smooth scaling",
-          "Anti-aliasing for scaled video: resamples with a higher-quality filter, which removes jagged edges and shimmer when the video is larger than the screen. Costs a little extra GPU.",
-          s.smoothScaling,
-          (v) => {
-            s.smoothScaling = v;
-            save(true);
-          },
-        )}
-        {@render slider("sharpen", "Sharpness", 0, 100, 1, "%")}
-      </div>
-      <p class="note">
-        Video can't use the multisample anti-aliasing that games use, so smoothing here is done by
-        resampling. A little sharpness (10–30%) restores the crispness that smoothing softens.
-      </p>
-
-      <h2 class="cap">Effects</h2>
-      <div class="card">
-        {@render slider("grain", "Film grain", 0, 100, 1, "%")}
-        {@render slider("scanlines", "Scanlines", 0, 100, 1, "%")}
-        {@render slider("vignette", "Vignette", 0, 100, 1, "%")}
         <div class="row">
           <div class="lbl">
-            <label class="t" for="tint-color">Tint colour</label>
-            <div class="d">Colours the whole picture while keeping its light and dark.</div>
+            <div class="t">{rendererText}</div>
+            {#if renderer && renderer.vw > 0}
+              <div class="d">{t("rend.size", { vw: renderer.vw, vh: renderer.vh, cw: renderer.cw, ch: renderer.ch })}</div>
+            {/if}
+            {#if noScaleHint}
+              <div class="d">{t("rend.noScale")}</div>
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      <h2 class="cap">{t("cap.presets")}</h2>
+      <div class="card">
+        <div class="chips">
+          <button class="chip" onclick={() => applyPreset({})}>{t("preset.none")}</button>
+          {#each PRESETS as p (p.id)}
+            <button class="chip" class:on={matches(p.values)} onclick={() => applyPreset(p.values)}>
+              {t(`preset.${p.id}`)}
+            </button>
+          {/each}
+        </div>
+      </div>
+      <p class="note">{t("presets.note")}</p>
+
+      <h2 class="cap">{t("cap.quality")}</h2>
+      <div class="card">
+        {@render toggle("smooth", t("smooth.title"), t("smooth.desc"), s.smoothScaling, (v) => {
+          s.smoothScaling = v;
+          save(true);
+        })}
+        {@render toggle("aa", t("aa.title"), t("aa.desc"), s.antiAliasing, (v) => {
+          s.antiAliasing = v;
+          save(true);
+        })}
+        {@render slider("sharpen", t("sharpen"), 0, 100, 1, "%")}
+      </div>
+      <p class="note">{t("quality.note")}</p>
+
+      <h2 class="cap">{t("cap.effects")}</h2>
+      <div class="card">
+        {@render slider("grain", t("grain"), 0, 100, 1, "%")}
+        {@render slider("scanlines", t("scanlines"), 0, 100, 1, "%")}
+        {@render slider("vignette", t("vignette"), 0, 100, 1, "%")}
+        {@render slider("aberration", t("aberration"), 0, 100, 1, "%")}
+        {@render slider("pixelate", t("pixelate"), 0, 100, 1, "%")}
+        <div class="row">
+          <div class="lbl">
+            <label class="t" for="tint-color">{t("tint.color")}</label>
+            <div class="d">{t("tint.desc")}</div>
           </div>
           <input
             id="tint-color"
@@ -415,154 +507,181 @@
             }}
           />
         </div>
-        {@render slider("tintStrength", "Tint strength", 0, 100, 1, "%")}
+        {@render slider("tintStrength", t("tint.strength"), 0, 100, 1, "%")}
         <div class="row actions">
-          <button class="btn" onclick={resetEffects}>Reset effects</button>
+          <button class="btn" onclick={resetEffects}>{t("fx.reset")}</button>
         </div>
       </div>
-      <p class="note">
-        Grain also hides banding in dark gradients. Effects are drawn by the GPU on top of the
-        wallpaper and pause together with it.
-      </p>
+      <p class="note">{t("fx.note")}</p>
     {:else if tab === "performance"}
-      <h2 class="cap">Frame rate</h2>
+      {#if restartNeeded}
+        <div class="card">
+          <div class="row restart">
+            <div class="lbl">
+              <div class="t">{t("restart.t")}</div>
+              <div class="d">{t("restart.d")}</div>
+            </div>
+            <button class="btn primary" onclick={() => run("restart_app")}>{t("restart.btn")}</button>
+          </div>
+        </div>
+      {/if}
+
+      <h2 class="cap">{t("cap.powerMode")}</h2>
+      <div class="card">
+        <div class="chips">
+          {#each POWER_MODES as m (m.id)}
+            <button class="chip" class:on={matches(m.values)} onclick={() => applyPower(m.values)}>
+              {t(`power.${m.id}`)}
+            </button>
+          {/each}
+        </div>
+      </div>
+      <p class="note">{t("power.desc")}</p>
+
+      <h2 class="cap">{t("cap.frameRate")}</h2>
       <div class="card">
         <div class="row stack">
           <div class="lbl">
-            <div class="t">Frame limit</div>
-            <div class="d">
-              Limits how often frames are drawn to the desktop. Decoding still runs at the video's
-              own rate, and a limit above the video's frame rate changes nothing. Unlimited shows
-              the video directly, which is the cheapest path for the GPU.
-            </div>
+            <div class="t">{t("fps.title")}</div>
+            <div class="d">{t("fps.desc")}</div>
           </div>
-          {@render segmented("fps", "Frame limit", FPS_OPTIONS, s.fpsLimit, (v) => {
+          {@render segmented("fps", t("fps.title"), FPS_OPTIONS, s.fpsLimit, (v) => {
             s.fpsLimit = v;
             save(true);
           })}
         </div>
-      </div>
-
-      <h2 class="cap">Pause to save power</h2>
-      <div class="card">
-        {@render toggle(
-          "pause-covered",
-          "When windows cover the desktop",
-          "Stops decoding while other windows completely hide the wallpaper.",
-          s.pauseWhenCovered,
-          (v) => {
-            s.pauseWhenCovered = v;
-            save(true);
-          },
-        )}
-        {@render toggle(
-          "pause-battery",
-          "When the PC isn't plugged in",
-          "",
-          s.pauseOnBattery,
-          (v) => {
-            s.pauseOnBattery = v;
-            save(true);
-          },
-        )}
-      </div>
-
-      <h2 class="cap">Hardware options</h2>
-      <div class="card">
-        {@render toggle(
-          "gpu-accel",
-          "GPU acceleration",
-          "Turn off only if the wallpaper shows glitches. Everything is then drawn by the CPU.",
-          s.gpuAcceleration,
-          (v) => {
-            s.gpuAcceleration = v;
-            save(true);
-          },
-        )}
-        {@render toggle(
-          "hw-decode",
-          "Hardware video decoding",
-          "Lets the GPU decode the video, which uses far less power than the CPU.",
-          s.hwVideoDecode,
-          (v) => {
-            s.hwVideoDecode = v;
-            save(true);
-          },
-        )}
         <div class="row stack">
           <div class="lbl">
-            <div class="t">Graphics profile</div>
-            <div class="d">
-              Compatible is the safest. Balanced adds GPU drawing and zero-copy uploads. Maximum
-              also uses GPUs that the engine normally blocks because of old drivers.
-            </div>
+            <div class="t">{t("bfps.title")}</div>
+            <div class="d">{t("bfps.desc")}</div>
           </div>
-          {@render segmented("profile", "Graphics profile", PROFILE_OPTIONS, s.gpuProfile, (v) => {
+          {@render segmented("bfps", t("bfps.title"), BATTERY_FPS_OPTIONS, s.batteryFps, (v) => {
+            s.batteryFps = v;
+            save(true);
+          })}
+        </div>
+        {@render slider("renderScale", t("scale.title"), 50, 100, 5, "%")}
+      </div>
+      <p class="note">{t("scale.desc")}</p>
+
+      <h2 class="cap">{t("cap.pause")}</h2>
+      <div class="card">
+        {@render toggle("pause-covered", t("pause.covered.t"), t("pause.covered.d"), s.pauseWhenCovered, (v) => {
+          s.pauseWhenCovered = v;
+          save(true);
+        })}
+        {@render toggle("pause-battery", t("pause.battery.t"), "", s.pauseOnBattery, (v) => {
+          s.pauseOnBattery = v;
+          save(true);
+        })}
+      </div>
+
+      <h2 class="cap">{t("cap.gpu")}</h2>
+      <div class="card">
+        <div class="row">
+          <div class="lbl">
+            <div class="d">{t("gpu.desc")}</div>
+          </div>
+        </div>
+        <div class="gpus" role="radiogroup" aria-label={t("cap.gpu")}>
+          <label class="gpu">
+            <input type="radio" name="gpu" checked={s.gpuChoice === "auto"} onchange={() => chooseGpu("auto")} />
+            <span class="gtxt">
+              <span class="name">{t("gpu.auto")}</span>
+              <span class="sub">{t("gpu.autoD")}</span>
+            </span>
+          </label>
+          {#each gpus ?? [] as g, i (g.name + i)}
+            <label class="gpu">
+              <input
+                type="radio"
+                name="gpu"
+                checked={isChosen(g, i)}
+                onchange={() => chooseGpu(choiceFor(g))}
+              />
+              <span class="gtxt">
+                <span class="name">{g.name}</span>
+                <span class="sub">{t(g.kind === "discrete" ? "gpu.discreteD" : "gpu.integratedD")}</span>
+              </span>
+              <span class="badge">{t(g.kind === "discrete" ? "gpu.discrete" : "gpu.integrated")}</span>
+            </label>
+          {/each}
+        </div>
+        {#if gpuError}
+          <p class="msg bad pad">{t("gpu.failed", { error: gpuError })}</p>
+        {:else if gpus === null}
+          <p class="d pad">{t("gpu.detecting")}</p>
+        {:else if gpus.length <= 1}
+          <p class="d pad">{t("gpu.single")}</p>
+        {/if}
+        <div class="row">
+          <div class="lbl">
+            <div class="d">{t("gpu.inUse", { name: gpu ?? t("gpu.unknown") })}</div>
+          </div>
+          <button class="btn" onclick={() => run("open_graphics_settings")}>{t("gpu.open")}</button>
+        </div>
+      </div>
+
+      <h2 class="cap">{t("cap.hardware")}</h2>
+      <div class="card">
+        {@render toggle("gpu-accel", t("gpuaccel.t"), t("gpuaccel.d"), s.gpuAcceleration, (v) => {
+          s.gpuAcceleration = v;
+          save(true);
+        })}
+        {@render toggle("hw-decode", t("hwdec.t"), t("hwdec.d"), s.hwVideoDecode, (v) => {
+          s.hwVideoDecode = v;
+          save(true);
+        })}
+        <div class="row stack">
+          <div class="lbl">
+            <div class="t">{t("profile.t")}</div>
+            <div class="d">{t("profile.d")}</div>
+          </div>
+          {@render segmented("profile", t("profile.t"), PROFILE_OPTIONS, s.gpuProfile, (v) => {
             s.gpuProfile = v;
             save(true);
           })}
         </div>
-        <div class="row">
-          <div class="lbl">
-            <div class="t">Choose which GPU to use</div>
-            <div class="d">
-              Windows decides this per program. Add msedgewebview2.exe in Graphics settings to pick
-              a graphics card.
-            </div>
-          </div>
-          <button class="btn" onclick={() => run("open_graphics_settings")}>Open</button>
-        </div>
-        {#if restartNeeded}
-          <div class="row restart">
-            <div class="lbl">
-              <div class="t">Restart to apply</div>
-              <div class="d">Hardware options are read when LiveWallpaper starts.</div>
-            </div>
-            <button class="btn primary" onclick={() => run("restart_app")}>Restart now</button>
-          </div>
-        {/if}
       </div>
 
-      <h2 class="cap">Graphics hardware</h2>
+      <h2 class="cap">{t("cap.formats")}</h2>
       <div class="card">
-        <div class="row">
-          <div class="lbl">
-            <div class="t">Graphics adapter</div>
-            <div class="d">{gpu ?? "Not reported by the webview"}</div>
-          </div>
-        </div>
         <div class="tbl">
           <table>
             <thead>
-              <tr><th>Format</th><th>Playback</th><th>Hardware decode</th></tr>
+              <tr><th>{t("fmt.format")}</th><th>{t("fmt.playback")}</th><th>{t("fmt.hw")}</th></tr>
             </thead>
             <tbody>
               {#each support as c (c.name)}
                 <tr>
                   <td>{c.name}</td>
-                  <td class:yes={c.playback === "Yes"} class:no={c.playback === "No"}>{c.playback}</td>
-                  <td class:yes={c.hardware === "Yes"} class:no={c.hardware === "No"}>{c.hardware}</td>
+                  <td class:yes={c.playback === "Yes"} class:no={c.playback === "No"}>{answer(c.playback)}</td>
+                  <td class:yes={c.hardware === "Yes"} class:no={c.hardware === "No"}>{answer(c.hardware)}</td>
                 </tr>
               {/each}
             </tbody>
           </table>
         </div>
       </div>
-      <p class="note">
-        Videos in a format marked “Yes” under Hardware decode are decoded by the GPU, which uses far
-        less power than software decoding. “No” means the CPU does the work; re-encoding to H.264 or
-        HEVC usually fixes that. Hardware decode is checked at 1080p.
-      </p>
+      <p class="note">{t("fmt.note")}</p>
     {:else}
-      <h2 class="cap">Startup</h2>
+      <h2 class="cap">{t("cap.language")}</h2>
       <div class="card">
-        {@render toggle(
-          "autostart",
-          "Start with Windows",
-          "Launches LiveWallpaper when you sign in.",
-          autostart,
-          (_v, el) => void setAutostart(el),
-        )}
+        <div class="row stack">
+          <div class="lbl">
+            <div class="t">{t("lang.t")}</div>
+            <div class="d">{t("lang.d")}</div>
+          </div>
+          {@render segmented("lang", t("lang.t"), LANGUAGE_OPTIONS, s.language, (v) => {
+            s.language = v;
+            save(true);
+          })}
+        </div>
+      </div>
+
+      <h2 class="cap">{t("cap.startup")}</h2>
+      <div class="card">
+        {@render toggle("autostart", t("autostart.t"), t("autostart.d"), autostart, (_v, el) => void setAutostart(el))}
         {#if autostartError}
           <div class="row">
             <p class="msg bad" role="status">{autostartError}</p>
@@ -919,5 +1038,79 @@
   td.no {
     color: var(--muted);
     opacity: 0.7;
+  }
+
+  /* ---- Presets, GPU list ---- */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 14px;
+  }
+  .chip {
+    padding: 6px 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .chip:hover {
+    background: var(--surface-3);
+  }
+  .chip.on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+  .gpus {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 4px 14px 12px;
+  }
+  .gpu {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-2);
+    cursor: pointer;
+  }
+  .gpu:has(input:checked) {
+    border-color: var(--accent);
+  }
+  .gpu input {
+    accent-color: var(--accent);
+    margin: 0;
+  }
+  .gtxt {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .gtxt .name {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .gtxt .sub {
+    color: var(--muted);
+    font-size: 12.5px;
+  }
+  .badge {
+    flex: none;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .pad {
+    margin: 0;
+    padding: 0 14px 12px;
   }
 </style>

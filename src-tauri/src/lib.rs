@@ -70,7 +70,8 @@ pub fn run() {
             settings::get_autostart,
             settings::set_autostart,
             settings::restart_app,
-            settings::open_graphics_settings
+            settings::open_graphics_settings,
+            settings::list_gpus
         ])
         .setup(|app| {
             let handle = app.handle().clone();

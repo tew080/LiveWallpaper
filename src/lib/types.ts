@@ -38,6 +38,20 @@ export interface Settings {
   gpuAcceleration: boolean;
   hwVideoDecode: boolean;
   gpuProfile: "compatible" | "balanced" | "maximum";
+  /** Which GPU Windows should use for the wallpaper engine (after a restart). */
+  gpuChoice: "auto" | "power" | "performance";
+  /** Edge anti-aliasing (FXAA) in the GPU shader. */
+  antiAliasing: boolean;
+  /** Chromatic aberration, pixelate: 0..100. Colour temperature: -100 (cool)..100 (warm). */
+  aberration: number;
+  pixelate: number;
+  temperature: number;
+  /** Internal render resolution, 50..100 (% of the screen). */
+  renderScale: number;
+  /** Frame limit used while on battery: 0 = same as above. */
+  batteryFps: number;
+  /** "auto" follows the system language. */
+  language: "auto" | "en" | "th";
 }
 
 export interface RuntimeState {
@@ -73,30 +87,71 @@ export const DEFAULT_SETTINGS: Settings = {
   gpuAcceleration: true,
   hwVideoDecode: true,
   gpuProfile: "maximum",
+  gpuChoice: "auto",
+  antiAliasing: false,
+  aberration: 0,
+  pixelate: 0,
+  temperature: 0,
+  renderScale: 100,
+  batteryFps: 0,
+  language: "auto",
 };
 
+// Option labels are looked up in i18n.ts by their `key`.
 export const FPS_OPTIONS = [
-  { value: 24, label: "24" },
-  { value: 30, label: "30" },
-  { value: 60, label: "60" },
-  { value: 0, label: "Unlimited" },
+  { value: 24, key: "24" },
+  { value: 30, key: "30" },
+  { value: 60, key: "60" },
+  { value: 0, key: "opt.unlimited" },
+];
+
+export const BATTERY_FPS_OPTIONS = [
+  { value: 0, key: "opt.noChange" },
+  { value: 15, key: "15" },
+  { value: 24, key: "24" },
+  { value: 30, key: "30" },
 ];
 
 export const LOOP_OPTIONS = [
-  { value: 0, label: "Seamless" },
-  { value: 0.5, label: "0.5 s fade" },
-  { value: 1, label: "1 s fade" },
-  { value: 2, label: "2 s fade" },
+  { value: 0, key: "opt.seamless" },
+  { value: 0.5, key: "opt.fade05" },
+  { value: 1, key: "opt.fade1" },
+  { value: 2, key: "opt.fade2" },
 ];
 
 export const FIT_OPTIONS = [
-  { value: "cover", label: "Fill" },
-  { value: "contain", label: "Fit" },
-  { value: "fill", label: "Stretch" },
+  { value: "cover", key: "opt.fill" },
+  { value: "contain", key: "opt.fit" },
+  { value: "fill", key: "opt.stretch" },
 ];
 
 export const PROFILE_OPTIONS = [
-  { value: "compatible", label: "Compatible" },
-  { value: "balanced", label: "Balanced" },
-  { value: "maximum", label: "Maximum" },
+  { value: "compatible", key: "opt.compatible" },
+  { value: "balanced", key: "opt.balanced" },
+  { value: "maximum", key: "opt.maximum" },
+];
+
+export const LANGUAGE_OPTIONS = [
+  { value: "auto", key: "opt.auto" },
+  { value: "en", key: "English" },
+  { value: "th", key: "ไทย" },
+];
+
+/** One-click looks for the Effects tab. Missing keys fall back to the defaults. */
+export const PRESETS: { id: string; values: Partial<Settings> }[] = [
+  { id: "cinematic", values: { vignette: 45, grain: 18, contrast: 112, saturation: 90, temperature: 12 } },
+  { id: "retro", values: { scanlines: 45, aberration: 22, vignette: 35, grain: 12, saturation: 115 } },
+  { id: "noir", values: { grayscale: 100, contrast: 125, vignette: 50, grain: 25 } },
+  { id: "warm", values: { temperature: 40, tintColor: "#ffa65c", tintStrength: 14, vignette: 20, saturation: 108 } },
+  { id: "dream", values: { blur: 1.5, brightness: 108, saturation: 120, temperature: -12, vignette: 25 } },
+];
+
+/** Presets: "Eco" and "Quality" for the Performance tab. */
+export const POWER_MODES: { id: string; values: Partial<Settings> }[] = [
+  {
+    id: "eco",
+    values: { fpsLimit: 24, renderScale: 75, batteryFps: 15, pauseWhenCovered: true, pauseOnBattery: false },
+  },
+  { id: "balanced", values: { fpsLimit: 30, renderScale: 100, batteryFps: 24, pauseWhenCovered: true } },
+  { id: "quality", values: { fpsLimit: 60, renderScale: 100, batteryFps: 0, pauseWhenCovered: true } },
 ];

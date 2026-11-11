@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import { createGL, type Fx, type GLRenderer, type RendererInfo } from "./gl";
 
   interface Props {
     src: string;
@@ -16,7 +17,13 @@
     smooth?: boolean;
     /** cover = fill and crop, contain = fit with bars, fill = stretch. */
     fit?: "cover" | "contain" | "fill";
+    /** Draw through the WebGL shader (effects, anti-aliasing, smooth scaling). Falls back to the canvas if it can't. */
+    gl?: boolean;
+    fx?: Fx;
+    /** Internal resolution in percent of the screen, 50..100. */
+    renderScale?: number;
     onstatus?: (ok: boolean, message?: string) => void;
+    onrenderer?: (info: RendererInfo) => void;
   }
 
   let {
@@ -29,7 +36,11 @@
     loopFade = 0,
     smooth = false,
     fit = "cover",
+    gl = false,
+    fx,
+    renderScale = 100,
     onstatus,
+    onrenderer,
   }: Props = $props();
 
   // Two copies of the same video take turns. While one plays, the other sits
@@ -39,8 +50,15 @@
   let a = $state<HTMLVideoElement>();
   let b = $state<HTMLVideoElement>();
   let canvas = $state<HTMLCanvasElement>();
-  // The elements are shown directly only when no frame limit and no smoothing is wanted.
-  const direct = $derived(fps === 0 && !smooth);
+  // Why the shader path failed (null = fine). A failure falls back to the 2D canvas.
+  let glReason = $state<string | null>(null);
+  // Video is requested with CORS so WebGL may read it; dropped if the webview refuses.
+  let cors = $state(true);
+  let everLoaded = false;
+  let retrying = false;
+  const useGL = $derived(gl && !!fx && glReason === null);
+  // The elements are shown directly only when no frame limit, smoothing or shader is wanted.
+  const direct = $derived(fps === 0 && !smooth && !useGL);
 
   // Player state. Plain variables on purpose: it changes every frame and is
   // never rendered by Svelte.
@@ -52,6 +70,8 @@
   let frameDur = 1 / 30;
   let lastMedia = -1;
   let paintNow: (() => void) | null = null;
+  let resizeNow: (() => void) | null = null;
+  let kind: RendererInfo["mode"] = "direct";
 
   const active = () => (cur === 0 ? a : b)!;
   const standby = () => (cur === 0 ? b : a)!;
@@ -61,7 +81,32 @@
     return "The webview can't decode this file (unsupported container or codec). H.264/AAC in MP4 and VP9/Opus in WebM are the safest choices.";
   }
 
+  function report() {
+    const v = a;
+    const c = canvas;
+    onrenderer?.({
+      mode: kind,
+      reason: gl ? glReason : null,
+      vw: v?.videoWidth ?? 0,
+      vh: v?.videoHeight ?? 0,
+      cw: c?.width ?? Math.round(window.innerWidth * (window.devicePixelRatio || 1)),
+      ch: c?.height ?? Math.round(window.innerHeight * (window.devicePixelRatio || 1)),
+    });
+  }
+
   function onError(v: HTMLVideoElement) {
+    if (retrying) return; // both copies report the same failure
+    if (cors && !everLoaded && v.error?.code === 4 && a && b) {
+      // Might be the CORS request that failed rather than the codec: retry without it.
+      cors = false;
+      retrying = true;
+      glReason = "The webview did not allow reading the video for the GPU shader.";
+      for (const x of [a, b]) {
+        x.removeAttribute("crossorigin");
+        x.load();
+      }
+      return;
+    }
     const err = v.error;
     onstatus?.(false, err?.code === 4 ? unsupported() : `Playback error${err?.message ? `: ${err.message}` : ""}`);
   }
@@ -171,8 +216,11 @@
   }
 
   function onLoaded(v?: HTMLVideoElement) {
+    everLoaded = true;
+    retrying = false;
     if (v && v === active() && !paused) void play(v, true);
     paintNow?.();
+    report();
   }
 
   function onEnded(v?: HTMLVideoElement) {
@@ -221,10 +269,28 @@
     layout();
   });
 
-  // Redraw the canvas right away when the fit mode changes.
+  // Redraw right away when anything that shapes the picture changes (matters while paused).
   $effect(() => {
     void fit;
+    void fx;
     paintNow?.();
+  });
+
+  $effect(() => {
+    void renderScale;
+    resizeNow?.();
+  });
+
+  // Turning the shader off and on again gives it another try.
+  $effect(() => {
+    if (!gl) glReason = null;
+  });
+
+  $effect(() => {
+    void useGL;
+    void direct;
+    void glReason;
+    untrack(report);
   });
 
   // Pause / resume (a paused <video> stops decoding, which is what saves power)
@@ -241,19 +307,33 @@
     }
   });
 
-  // Frame loop: hand-over logic every display frame, canvas painting (when the
-  // frame rate is capped) every presented video frame.
+  // Frame loop. Hand-over logic runs on every presented video frame (no timer
+  // wakes the page while the video is paused or stalled); canvas painting
+  // (when the frame rate is capped or the shader is used) happens on the same
+  // callbacks.
   $effect(() => {
     const x = a;
     const y = b;
     if (!x || !y) return;
-    const c = canvas; // only exists when the video is drawn through the canvas
+    const c = canvas; // only exists when the video is drawn through a canvas
+    const wantGL = useGL;
     const capped = !!c;
-    const ctx = c ? c.getContext("2d", { alpha: false }) : null;
+    let renderer: GLRenderer | null = null;
+    let ctx: CanvasRenderingContext2D | null = null;
+    if (c && wantGL) {
+      try {
+        renderer = createGL(c);
+      } catch (e) {
+        glReason = e instanceof Error ? e.message : String(e);
+        return; // the canvas is replaced and this effect runs again with the 2D path
+      }
+    } else if (c) {
+      ctx = c.getContext("2d", { alpha: false });
+    }
+    kind = renderer ? "gl" : capped ? "canvas" : "direct";
     const interval = fps > 0 ? 1000 / fps : 0; // 0 = paint every video frame
     let nextDue = 0;
     let stopped = false;
-    let raf = 0;
     const handles = new Map<HTMLVideoElement, number>();
 
     const draw = (v: HTMLVideoElement, alpha: number) => {
@@ -276,7 +356,7 @@
       ctx.drawImage(v, (c.width - dw) / 2, (c.height - dh) / 2, dw, dh);
     };
 
-    const paint = () => {
+    const paint2d = () => {
       if (!ctx || !c) return;
       if (fit !== "cover") {
         ctx.globalAlpha = 1;
@@ -288,12 +368,34 @@
       ctx.globalAlpha = 1;
     };
 
+    const paintGL = () => {
+      if (!renderer || !c || !fx) return;
+      const px = c.width / Math.max(1, window.innerWidth);
+      try {
+        if (renderer.draw(active(), fit, fx, 1, px) && fading && mix > 0) {
+          renderer.draw(standby(), fit, fx, mix, px);
+        }
+      } catch (e) {
+        // e.g. the webview refuses to hand this video to WebGL
+        glReason = e instanceof Error ? e.message : String(e);
+      }
+    };
+
+    const paint = renderer ? paintGL : paint2d;
+
     const resize = () => {
       if (!c) return;
       const dpr = Math.min(window.devicePixelRatio || 1, 4);
-      c.width = Math.floor(window.innerWidth * dpr);
-      c.height = Math.floor(window.innerHeight * dpr);
+      const k = clamp(renderScale, 50, 100) / 100;
+      c.width = Math.max(1, Math.floor(window.innerWidth * dpr * k));
+      c.height = Math.max(1, Math.floor(window.innerHeight * dpr * k));
       paint();
+      report();
+    };
+
+    const onLost = (e: Event) => {
+      e.preventDefault();
+      glReason = "The GPU context was lost.";
     };
 
     const watch = (v: HTMLVideoElement) => {
@@ -310,31 +412,30 @@
           // accumulate so e.g. 24 fps from a 30 fps source averages 24, not 15
           nextDue = now - nextDue > interval ? now + interval : nextDue + interval;
         }
+        tick();
         handles.set(v, v.requestVideoFrameCallback(cb));
       };
       handles.set(v, v.requestVideoFrameCallback(cb));
     };
 
-    const loop = () => {
-      raf = requestAnimationFrame(loop);
-      tick();
-    };
-
     if (capped) {
       paintNow = paint;
-      resize();
+      resizeNow = resize;
+      c.addEventListener("webglcontextlost", onLost);
       window.addEventListener("resize", resize);
+      untrack(resize); // untracked: the settings it reads have their own effects
     }
     watch(x);
     watch(y);
-    raf = requestAnimationFrame(loop);
 
     return () => {
       stopped = true;
-      cancelAnimationFrame(raf);
       for (const [v, h] of handles) v.cancelVideoFrameCallback(h);
       window.removeEventListener("resize", resize);
+      c?.removeEventListener("webglcontextlost", onLost);
+      renderer?.destroy();
       paintNow = null;
+      resizeNow = null;
     };
   });
 </script>
@@ -346,6 +447,7 @@
   style:object-fit={fit}
   playsinline
   preload="auto"
+  crossorigin={cors ? "anonymous" : null}
   onloadeddata={() => onLoaded(a)}
   onseeked={() => paintNow?.()}
   onended={() => onEnded(a)}
@@ -358,6 +460,7 @@
   style:object-fit={fit}
   playsinline
   preload="auto"
+  crossorigin={cors ? "anonymous" : null}
   onloadeddata={() => onLoaded(b)}
   onseeked={() => paintNow?.()}
   onended={() => onEnded(b)}
@@ -365,7 +468,10 @@
 ></video>
 
 {#if !direct}
-  <canvas bind:this={canvas}></canvas>
+  <!-- A canvas can only ever hold one kind of context, so it is replaced when the path changes. -->
+  {#key useGL}
+    <canvas bind:this={canvas}></canvas>
+  {/key}
 {/if}
 
 <style>

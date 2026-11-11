@@ -4,6 +4,7 @@
   import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
   import FlowField from "$lib/FlowField.svelte";
   import VideoWallpaper from "$lib/VideoWallpaper.svelte";
+  import type { Fx, RendererInfo } from "$lib/gl";
   import { DEFAULT_SETTINGS, type RuntimeState, type Settings } from "$lib/types";
 
   let settings = $state<Settings>({ ...DEFAULT_SETTINGS });
@@ -17,9 +18,61 @@
   );
   const src = $derived(settings.videoPath ? convertFileSrc(settings.videoPath) : null);
 
+  // Frame limit, lowered while on battery if the user asked for that.
+  const fps = $derived.by(() => {
+    const cap = settings.batteryFps;
+    if (!runtime.onBattery || cap === 0) return settings.fpsLimit;
+    return settings.fpsLimit === 0 ? cap : Math.min(settings.fpsLimit, cap);
+  });
+
+  // Anything beyond a plain video goes through the GPU shader (see gl.ts).
+  const fx = $derived<Fx>({
+    smooth: settings.smoothScaling,
+    aa: settings.antiAliasing,
+    sharpen: settings.sharpen,
+    aberration: settings.aberration,
+    pixelate: settings.pixelate,
+    temperature: settings.temperature,
+    brightness: settings.brightness,
+    contrast: settings.contrast,
+    saturation: settings.saturation,
+    hue: settings.hue,
+    grayscale: settings.grayscale,
+    sepia: settings.sepia,
+    tintColor: settings.tintColor,
+    tintStrength: settings.tintStrength,
+    vignette: settings.vignette,
+    scanlines: settings.scanlines,
+    grain: settings.grain,
+  });
+  const wantGL = $derived(
+    settings.smoothScaling ||
+      settings.antiAliasing ||
+      settings.sharpen > 0 ||
+      settings.aberration > 0 ||
+      settings.pixelate > 0 ||
+      settings.temperature !== 0 ||
+      settings.grain > 0 ||
+      settings.scanlines > 0 ||
+      settings.vignette > 0 ||
+      settings.tintStrength > 0 ||
+      settings.brightness !== 100 ||
+      settings.contrast !== 100 ||
+      settings.saturation !== 100 ||
+      settings.hue !== 0 ||
+      settings.grayscale > 0 ||
+      settings.sepia > 0,
+  );
+
+  // What the video component actually ended up using. While the shader is in
+  // charge it does every effect; otherwise the CSS layers below do.
+  let renderer = $state<RendererInfo | null>(null);
+  const shader = $derived(!!src && renderer?.mode === "gl");
+
   // Picture adjustments run on the GPU as one CSS filter. Defaults are left
   // out so an unadjusted wallpaper costs nothing extra.
   const filter = $derived.by(() => {
+    if (shader) return settings.blur > 0 ? `blur(${settings.blur}px)` : "none"; // the shader does the rest
     const parts: string[] = [];
     if (settings.sharpen > 0) parts.push("url(#lw-sharpen)");
     if (settings.brightness !== 100) parts.push(`brightness(${settings.brightness}%)`);
@@ -59,6 +112,11 @@
     void emit("wallpaper:status", { ok, message });
   }
 
+  function onrenderer(info: RendererInfo) {
+    renderer = info;
+    void emit("wallpaper:renderer", info);
+  }
+
   onMount(() => {
     noise = makeNoise();
     if (!("__TAURI_INTERNALS__" in window)) return; // plain browser (npm run dev)
@@ -74,6 +132,8 @@
         listen<Settings>("settings:changed", (e) => (settings = e.payload)),
         listen<RuntimeState>("runtime:changed", (e) => (runtime = e.payload)),
         listen("wallpaper:toggle", () => (userPaused = !userPaused)),
+        // the settings window asks when it opens
+        listen("renderer:request", () => renderer && void emit("wallpaper:renderer", renderer)),
       ]);
       if (disposed) subs.forEach((off) => off());
       else offs.push(...subs);
@@ -101,26 +161,31 @@
   {#if src}
     <VideoWallpaper
       {src}
-      fps={settings.fpsLimit}
+      {fps}
       volume={settings.volume}
       muted={settings.muted}
       speed={settings.speed}
       loopFade={settings.loopFade}
       smooth={settings.smoothScaling}
       fit={settings.fit}
+      gl={wantGL}
+      {fx}
+      renderScale={settings.renderScale}
       {paused}
       {onstatus}
+      {onrenderer}
     />
   {:else}
-    <FlowField fps={settings.fpsLimit} {paused} />
+    <FlowField {fps} {paused} />
   {/if}
 </div>
 
-{#if settings.tintStrength > 0}
+<!-- CSS fallback for the effects, used only when the shader isn't running. -->
+{#if !shader && settings.tintStrength > 0}
   <div class="tint" style:background={settings.tintColor} style:opacity={settings.tintStrength / 100}></div>
 {/if}
 
-{#if settings.grain > 0}
+{#if !shader && settings.grain > 0}
   <div
     class="grain"
     class:still={paused}
@@ -129,11 +194,11 @@
   ></div>
 {/if}
 
-{#if settings.scanlines > 0}
+{#if !shader && settings.scanlines > 0}
   <div class="scan" style:opacity={settings.scanlines / 100}></div>
 {/if}
 
-{#if settings.vignette > 0}
+{#if !shader && settings.vignette > 0}
   <div class="vignette" style:opacity={settings.vignette / 100}></div>
 {/if}
 

@@ -51,6 +51,22 @@ pub struct Settings {
     pub hw_video_decode: bool,
     /// "compatible", "balanced" or "maximum"
     pub gpu_profile: String,
+    /// "auto", "power" (power saving GPU) or "performance" (high performance GPU).
+    /// Stored per program by Windows, see `apply_gpu_choice`.
+    pub gpu_choice: String,
+    /// FXAA edge anti-aliasing in the GPU shader.
+    pub anti_aliasing: bool,
+    /// 0.0 ..= 100.0
+    pub aberration: f64,
+    pub pixelate: f64,
+    /// -100.0 (cool) ..= 100.0 (warm)
+    pub temperature: f64,
+    /// Internal render resolution, 50.0 ..= 100.0 (% of the screen)
+    pub render_scale: f64,
+    /// Frame limit while on battery: 0 = unchanged
+    pub battery_fps: u32,
+    /// "auto", "en" or "th"
+    pub language: String,
 }
 
 impl Default for Settings {
@@ -82,6 +98,14 @@ impl Default for Settings {
             gpu_acceleration: true,
             hw_video_decode: true,
             gpu_profile: "maximum".into(),
+            gpu_choice: "auto".into(),
+            anti_aliasing: false,
+            aberration: 0.0,
+            pixelate: 0.0,
+            temperature: 0.0,
+            render_scale: 100.0,
+            battery_fps: 0,
+            language: "auto".into(),
         }
     }
 }
@@ -129,11 +153,18 @@ pub fn load(app: &AppHandle) -> Settings {
 /// `%APPDATA%\<identifier>`.
 #[allow(dead_code)]
 pub fn load_early(identifier: &str) -> Settings {
-    std::env::var_os("APPDATA")
+    let settings: Settings = std::env::var_os("APPDATA")
         .map(|d| PathBuf::from(d).join(identifier).join("settings.json"))
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // The WebView2 runtime lives in a versioned folder that changes when it
+    // updates, so the GPU choice is written again on every start. This runs
+    // before the webview starts, so the choice is already in place for it.
+    if settings.gpu_choice != "auto" {
+        apply_gpu_choice(&settings.gpu_choice);
+    }
+    settings
 }
 
 /// Command-line flags for WebView2, chosen from the hardware options.
@@ -224,6 +255,20 @@ pub fn set_settings(
     settings.grain = settings.grain.clamp(0.0, 100.0);
     settings.scanlines = settings.scanlines.clamp(0.0, 100.0);
     settings.tint_strength = settings.tint_strength.clamp(0.0, 100.0);
+    settings.aberration = settings.aberration.clamp(0.0, 100.0);
+    settings.pixelate = settings.pixelate.clamp(0.0, 100.0);
+    settings.temperature = settings.temperature.clamp(-100.0, 100.0);
+    settings.render_scale = settings.render_scale.clamp(50.0, 100.0);
+    settings.battery_fps = match settings.battery_fps {
+        15 | 24 | 30 => settings.battery_fps,
+        _ => 0,
+    };
+    if !matches!(settings.gpu_choice.as_str(), "auto" | "power" | "performance") {
+        settings.gpu_choice = Settings::default().gpu_choice;
+    }
+    if !matches!(settings.language.as_str(), "auto" | "en" | "th") {
+        settings.language = Settings::default().language;
+    }
     let hex = settings.tint_color.strip_prefix('#').unwrap_or("");
     if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         settings.tint_color = Settings::default().tint_color;
@@ -249,7 +294,10 @@ pub fn set_settings(
     }
 
     save(&app, &settings)?;
-    *state.settings.lock().unwrap() = settings.clone();
+    let previous = std::mem::replace(&mut *state.settings.lock().unwrap(), settings.clone());
+    if previous.gpu_choice != settings.gpu_choice {
+        apply_gpu_choice(&settings.gpu_choice);
+    }
     app.emit("settings:changed", &settings)
         .map_err(|e| e.to_string())
 }
@@ -334,5 +382,109 @@ pub fn open_graphics_settings() -> Result<(), String> {
     #[cfg(not(windows))]
     {
         Err("Graphics settings are only available on Windows.".into())
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuInfo {
+    pub name: String,
+    /// "integrated" or "discrete" (a guess from the name)
+    pub kind: String,
+}
+
+/// Lists the graphics adapters Windows knows about.
+#[tauri::command]
+pub async fn list_gpus() -> Result<Vec<GpuInfo>, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let out = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name | ConvertTo-Json -Compress",
+            ])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let value: serde_json::Value =
+            serde_json::from_str(text.trim_start_matches('\u{feff}').trim()).map_err(|e| e.to_string())?;
+        let names: Vec<String> = match value {
+            serde_json::Value::String(s) => vec![s],
+            serde_json::Value::Array(a) => a
+                .into_iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+            _ => Vec::new(),
+        };
+        Ok(names
+            .into_iter()
+            // virtual adapters (remote desktop, basic display driver)
+            .filter(|n| {
+                let l = n.to_lowercase();
+                !(l.contains("basic render") || l.contains("remote") || l.contains("virtual"))
+            })
+            .map(|name| {
+                let l = name.to_lowercase();
+                let discrete = l.contains("nvidia")
+                    || l.contains("geforce")
+                    || l.contains("quadro")
+                    || l.contains(" arc ")
+                    || l.contains("radeon rx")
+                    || l.contains("radeon pro");
+                GpuInfo {
+                    kind: if discrete { "discrete" } else { "integrated" }.into(),
+                    name,
+                }
+            })
+            .collect())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Listing graphics cards is only available on Windows.".into())
+    }
+}
+
+/// Writes (or removes) Windows' per-program GPU preference for the WebView2
+/// runtime, which is the process that draws the wallpaper, and for this app.
+/// This is the same value the Windows "Graphics settings" page stores:
+/// `GpuPreference=1` is the power saving GPU, `2` the high performance GPU.
+fn apply_gpu_choice(choice: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const KEY: &str = r"HKCU\Software\Microsoft\DirectX\UserGpuPreferences";
+        let mut exes: Vec<PathBuf> = Vec::new();
+        if let Ok(me) = std::env::current_exe() {
+            exes.push(me);
+        }
+        for var in ["ProgramFiles(x86)", "ProgramFiles"] {
+            let Some(root) = std::env::var_os(var) else { continue };
+            let dir = PathBuf::from(root).join(r"Microsoft\EdgeWebView\Application");
+            let Ok(entries) = fs::read_dir(dir) else { continue };
+            for e in entries.flatten() {
+                let exe = e.path().join("msedgewebview2.exe");
+                if exe.is_file() {
+                    exes.push(exe);
+                }
+            }
+        }
+        for exe in exes {
+            let path = exe.to_string_lossy().into_owned();
+            let mut cmd = std::process::Command::new("reg.exe");
+            match choice {
+                "power" => cmd.args(["add", KEY, "/v", path.as_str(), "/t", "REG_SZ", "/d", "GpuPreference=1;", "/f"]),
+                "performance" => cmd.args(["add", KEY, "/v", path.as_str(), "/t", "REG_SZ", "/d", "GpuPreference=2;", "/f"]),
+                _ => cmd.args(["delete", KEY, "/v", path.as_str(), "/f"]),
+            };
+            let _ = cmd.creation_flags(0x0800_0000).output();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = choice;
     }
 }
