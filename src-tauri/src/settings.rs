@@ -18,6 +18,20 @@ pub struct Settings {
     pub muted: bool,
     pub pause_when_covered: bool,
     pub pause_on_battery: bool,
+    /// Picture adjustments in percent (100 = unchanged), applied as a CSS filter.
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
+    /// Degrees, -180.0 ..= 180.0
+    pub hue: f64,
+    /// Pixels, 0.0 ..= 20.0
+    pub blur: f64,
+    /// 0.0 ..= 100.0
+    pub vignette: f64,
+    /// Playback speed, 0.25 ..= 2.0
+    pub speed: f64,
+    /// Loop transition in seconds: 0 = seamless hand-off, > 0 = crossfade
+    pub loop_fade: f64,
 }
 
 impl Default for Settings {
@@ -29,6 +43,14 @@ impl Default for Settings {
             muted: true,
             pause_when_covered: true,
             pause_on_battery: false,
+            brightness: 100.0,
+            contrast: 100.0,
+            saturation: 100.0,
+            hue: 0.0,
+            blur: 0.0,
+            vignette: 0.0,
+            speed: 1.0,
+            loop_fade: 0.0,
         }
     }
 }
@@ -100,6 +122,14 @@ pub fn set_settings(
         _ => 0,
     };
     settings.volume = settings.volume.clamp(0.0, 1.0);
+    settings.brightness = settings.brightness.clamp(20.0, 200.0);
+    settings.contrast = settings.contrast.clamp(50.0, 200.0);
+    settings.saturation = settings.saturation.clamp(0.0, 200.0);
+    settings.hue = settings.hue.clamp(-180.0, 180.0);
+    settings.blur = settings.blur.clamp(0.0, 20.0);
+    settings.vignette = settings.vignette.clamp(0.0, 100.0);
+    settings.speed = settings.speed.clamp(0.25, 2.0);
+    settings.loop_fade = settings.loop_fade.clamp(0.0, 3.0);
 
     if let Some(path) = &settings.video_path {
         if !std::path::Path::new(path).is_file() {
