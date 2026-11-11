@@ -47,7 +47,9 @@
     | "speed"
     | "renderScale"
     | "aaAmount"
-    | "upscaleSharp";
+    | "upscaleSharp"
+    | "fsrStrength"
+    | "compareX";
 
   type Gpu = { name: string; kind: string };
 
@@ -507,11 +509,24 @@
         })}
         {#if s.upscaler}
           {@render slider("upscaleSharp", t("up.sharp"), 0, 100, 1, "%")}
+          {@render slider("fsrStrength", t("fsr.str"), 0, 100, 5, "%")}
+          {@render toggle("taa", t("taa.title"), t("taa.desc"), s.taa, (v) => {
+            s.taa = v;
+            save(true);
+          })}
         {/if}
         {@render toggle("compare", t("cmp.title"), t("cmp.desc"), s.compare, (v) => {
           s.compare = v;
           save(true);
         })}
+        {#if s.compare}
+          <div class="row stack">
+            <div class="lbl">
+              <div class="t">{t("cmp.drag")}</div>
+            </div>
+            {@render slider("compareX", "Divider", 0, 100, 1, "%", 100)}
+          </div>
+        {/if}
       </div>
       <p class="note">{t("quality.note")}</p>
 

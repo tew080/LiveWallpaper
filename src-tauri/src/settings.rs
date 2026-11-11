@@ -75,6 +75,12 @@ pub struct Settings {
     pub bloom: f64,
     /// Shows the original on the left half of the screen, to judge the effects.
     pub compare: bool,
+    /// Horizontal position of the compare divider, 0.0 ..= 1.0
+    pub compare_x: f64,
+    /// Temporal anti-aliasing (2-frame) used with the upscaler
+    pub taa: bool,
+    /// Overall strength of the FSR-lite upscaler pass, 0.0 ..= 100.0
+    pub fsr_strength: f64,
     /// Frame limit while on battery: 0 = unchanged
     pub battery_fps: u32,
     /// "auto", "en" or "th"
@@ -118,9 +124,12 @@ impl Default for Settings {
             render_scale: 100.0,
             upscaler: false,
             upscale_sharp: 50.0,
-            aa_amount: 150.0,
+            aa_amount: 100.0,
             bloom: 0.0,
             compare: false,
+            compare_x: 0.5,
+            taa: true,
+            fsr_strength: 60.0,
             battery_fps: 0,
             language: "auto".into(),
         }
@@ -203,6 +212,8 @@ pub fn webview_args(s: &Settings) -> String {
         "Translate",
         "MediaRouter",
         "OptimizationHints",
+        "AutofillServerCommunication",
+        "CertificateTransparencyComponentUpdater",
     ];
 
     if !s.gpu_acceleration {
@@ -230,6 +241,9 @@ pub fn webview_args(s: &Settings) -> String {
     args.push("--disable-background-networking");
     args.push("--disable-sync");
     args.push("--disable-default-apps");
+    args.push("--disable-component-update");
+    args.push("--disable-domain-reliability");
+    args.push("--disable-client-side-phishing-detection");
     args.push("--disable-background-timer-throttling");
     args.push("--disable-renderer-backgrounding");
     args.push("--disable-backgrounding-occluded-windows");
@@ -294,6 +308,8 @@ pub fn set_settings(
     settings.upscale_sharp = settings.upscale_sharp.clamp(0.0, 100.0);
     settings.aa_amount = settings.aa_amount.clamp(0.0, 200.0);
     settings.bloom = settings.bloom.clamp(0.0, 100.0);
+    settings.compare_x = settings.compare_x.clamp(0.0, 1.0);
+    settings.fsr_strength = settings.fsr_strength.clamp(0.0, 100.0);
     settings.battery_fps = match settings.battery_fps {
         15 | 24 | 30 => settings.battery_fps,
         _ => 0,

@@ -75,6 +75,11 @@ const en = {
   "bloom": "Bloom (glow)",
   "cmp.title": "Compare with the original",
   "cmp.desc": "Shows the unprocessed video on the left half of the screen and your settings on the right. Turn it off when you are done.",
+  "cmp.drag": "Drag the white line on the wallpaper to move the divider",
+  "taa.title": "Temporal AA (TAA-lite)",
+  "taa.desc": "Accumulates two sub-pixel samples for cleaner edges when using the upscaler. May show slight ghosting on very fast motion.",
+  "fsr.str": "FSR strength",
+  "fsr.strD": "How strongly the upscaler reshapes the picture (0 = soft, 100 = full RCAS).",
   sharpen: "Sharpness",
   "quality.note":
     "Video can't use the multisample anti-aliasing that games use, so smoothing is done in a shader. A little sharpness (10–30%) restores the crispness that smoothing softens.",
@@ -251,6 +256,11 @@ const th: Record<Key, string> = {
   "bloom": "Bloom (แสงเรือง)",
   "cmp.title": "เทียบกับต้นฉบับ",
   "cmp.desc": "แสดงวิดีโอที่ยังไม่ปรับครึ่งซ้ายของจอ และภาพตามค่าที่ตั้งครึ่งขวา ปิดเมื่อดูเสร็จ",
+  "cmp.drag": "ลากเส้นขาวบนวอลเปเปอร์เพื่อเลื่อนตำแหน่งแบ่ง",
+  "taa.title": "ลดรอยหยักแบบ Temporal (TAA-lite)",
+  "taa.desc": "สะสมตัวอย่างย่อยพิกเซล 2 เฟรมเพื่อขอบที่เรียบขึ้นเมื่อใช้ตัวอัปสเกล อาจเห็นเงาเล็กน้อยบนภาพเคลื่อนไหวเร็วมาก",
+  "fsr.str": "ความแรง FSR",
+  "fsr.strD": "ความแรงที่ตัวอัปสเกลปรับภาพ (0 = นุ่ม, 100 = RCAS เต็ม).",
   sharpen: "ความคมชัด",
   "quality.note":
     "วิดีโอใช้ลดรอยหยักแบบ multisample อย่างที่เกมใช้ไม่ได้ จึงทำผ่าน shader แทน ใส่ความคมเล็กน้อย (10–30%) จะช่วยคืนความคมที่การทำให้เรียบทำให้นุ่มลง",

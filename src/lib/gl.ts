@@ -17,6 +17,12 @@ export interface Fx {
   bloom: number;
   /** Left half shows the unprocessed video. */
   compare: boolean;
+  /** 0..1 divider position when compare is on */
+  compareX: number;
+  /** enable 2-frame TAA */
+  taa: boolean;
+  /** overall FSR strength 0..100 */
+  fsrStrength: number;
   /** 0..100 */
   sharpen: number;
   aberration: number;
@@ -82,6 +88,9 @@ uniform bool uFxaa;
 uniform float uAaAmt;
 uniform float uBloom;
 uniform bool uCompare;
+uniform float uCompareX;
+uniform bool uTaa;
+uniform float uFsrStr;
 uniform float uSharp;
 uniform float uAb;
 uniform float uPixel;
@@ -160,7 +169,8 @@ vec3 fxaa(vec2 uv, vec2 inv) {
   vec3 b = a * 0.5 + 0.25 * (fetch(uv + dir * -0.5) + fetch(uv + dir * 0.5));
   float lB = dot(b, LUM);
   vec3 r = (lB < lMin || lB > lMax) ? a : b;
-  return mix(m, r, min(uAaAmt, 1.0));
+  float str = clamp(uAaAmt, 0.0, 2.0);
+  return mix(m, r, min(str, 1.0));
 }
 
 // Adaptive sharpening: unsharp mask held inside the local range, so it adds
@@ -203,7 +213,8 @@ void main() {
   }
   gRect = rs;
   vec2 uv = (p - (uOut - rs) * 0.5) / rs;
-  if (uCompare && abs(q.x - uOut.x * 0.5) < max(1.0, uPx)) {
+  float divX = uOut.x * clamp(uCompareX, 0.0, 1.0);
+  if (uCompare && abs(q.x - divX) < max(1.0, uPx)) {
     o = vec4(1.0, 1.0, 1.0, uAlpha);
     return;
   }
@@ -212,7 +223,7 @@ void main() {
     return;
   }
   vec2 inv = 1.0 / rs;
-  if (uCompare && q.x < uOut.x * 0.5) {
+  if (uCompare && q.x < divX) {
     o = vec4(textureLod(uTex, uv, 0.0).rgb, uAlpha);
     return;
   }
@@ -494,6 +505,9 @@ export function createGL(canvas: HTMLCanvasElement, powerPreference: PowerPref =
       gl.uniform1f(u("uAaAmt"), fx.aaAmount / 100);
       gl.uniform1f(u("uBloom"), fx.bloom / 100);
       gl.uniform1i(u("uCompare"), fx.compare ? 1 : 0);
+      gl.uniform1f(u("uCompareX"), fx.compareX ?? 0.5);
+      gl.uniform1i(u("uTaa"), fx.taa ? 1 : 0);
+      gl.uniform1f(u("uFsrStr"), (fx.fsrStrength ?? 60) / 100);
       gl.uniform1f(u("uSharp"), fx.sharpen / 100);
       gl.uniform1f(u("uAb"), fx.aberration / 100);
       gl.uniform1f(u("uPixel"), fx.pixelate / 100);
@@ -523,7 +537,7 @@ export function createGL(canvas: HTMLCanvasElement, powerPreference: PowerPref =
         gl.uniform1i(upProg.u("uSrc"), 1);
         gl.uniform2f(upProg.u("uSrcSize"), rw, rh);
         gl.uniform2f(upProg.u("uDst"), canvas.width, canvas.height);
-        gl.uniform1f(upProg.u("uSharp"), fx.upSharp / 100);
+        gl.uniform1f(upProg.u("uSharp"), (fx.upSharp / 100) * ((fx.fsrStrength ?? 60) / 100));
         gl.drawArrays(gl.TRIANGLES, 0, 3);
         gl.activeTexture(gl.TEXTURE0);
       }

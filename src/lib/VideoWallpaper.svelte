@@ -310,6 +310,7 @@
   $effect(() => {
     void fit;
     void fx;
+    void fx?.compareX;
     paintNow?.();
   });
 

@@ -35,6 +35,9 @@
     scale: settings.renderScale / 100,
     bloom: settings.bloom,
     compare: settings.compare,
+    compareX: settings.compareX ?? 0.5,
+    taa: settings.taa ?? true,
+    fsrStrength: settings.fsrStrength ?? 60,
     sharpen: settings.sharpen,
     aberration: settings.aberration,
     pixelate: settings.pixelate,
@@ -216,7 +219,46 @@
   <div class="vignette" style:opacity={settings.vignette / 100}></div>
 {/if}
 
+{#if settings.compare && src}
+  <div
+    class="cmp-drag"
+    style:left="{(settings.compareX ?? 0.5) * 100}%"
+    onpointerdown={(e) => {
+      const el = e.currentTarget as HTMLElement;
+      el.setPointerCapture(e.pointerId);
+      const move = (ev: PointerEvent) => {
+        settings.compareX = Math.min(1, Math.max(0, ev.clientX / window.innerWidth));
+      };
+      const up = () => {
+        el.releasePointerCapture(e.pointerId);
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        void invoke("set_settings", { settings: $state.snapshot(settings) });
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    }}
+  ></div>
+{/if}
+
 <style>
+  .cmp-drag {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    margin-left: -2px;
+    background: rgba(255, 255, 255, 0.75);
+    cursor: ew-resize;
+    z-index: 50;
+    pointer-events: auto;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+  }
+  .cmp-drag::after {
+    content: "";
+    position: absolute;
+    inset: 0 -10px;
+  }
   :global(html),
   :global(body) {
     margin: 0;

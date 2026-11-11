@@ -58,6 +58,12 @@ export interface Settings {
   bloom: number;
   /** Original on the left half, processed on the right, to judge the effects. */
   compare: boolean;
+  /** 0..1 position of the compare divider */
+  compareX: number;
+  /** Temporal AA (2-frame) with FSR-lite */
+  taa: boolean;
+  /** FSR-lite overall strength 0..100 */
+  fsrStrength: number;
   /** Frame limit used while on battery: 0 = same as above. */
   batteryFps: number;
   /** "auto" follows the system language. */
@@ -105,9 +111,12 @@ export const DEFAULT_SETTINGS: Settings = {
   renderScale: 100,
   upscaler: false,
   upscaleSharp: 50,
-  aaAmount: 150,
+  aaAmount: 100,
   bloom: 0,
   compare: false,
+  compareX: 0.5,
+  taa: true,
+  fsrStrength: 60,
   batteryFps: 0,
   language: "auto",
 };
