@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
   import {
     BATTERY_FPS_OPTIONS,
@@ -163,6 +164,18 @@
 
   const run = (command: string) =>
     invoke(command).catch((e) => (status = { ok: false, message: String(e) }));
+
+  const APP_VERSION = "0.1.0";
+  const REPO_URL = "https://github.com/tew080/LiveWallpaper";
+  const PROFILE_URL = "https://github.com/tew080";
+  const LICENSE_URL = "https://github.com/tew080/LiveWallpaper/blob/main/LICENSE";
+
+  function openLink(url: string) {
+    void openUrl(url).catch(() => {
+      window.open(url, "_blank", "noopener,noreferrer");
+    });
+  }
+
 
   async function setAutostart(input: HTMLInputElement) {
     try {
@@ -759,6 +772,37 @@
           </div>
         {/if}
       </div>
+      <h2 class="cap">{t("cap.about")}</h2>
+      <div class="card">
+        <div class="row">
+          <div class="lbl">
+            <div class="t">{t("about.version", { version: APP_VERSION })}</div>
+            <div class="d">{t("about.dev")}: {t("about.devName")}</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="lbl">
+            <div class="t">{t("about.repo")}</div>
+            <div class="d">github.com/tew080/LiveWallpaper</div>
+          </div>
+          <button class="btn" type="button" onclick={() => openLink(REPO_URL)}>{t("about.repoOpen")}</button>
+        </div>
+        <div class="row">
+          <div class="lbl">
+            <div class="t">{t("about.profile")}</div>
+            <div class="d">github.com/tew080</div>
+          </div>
+          <button class="btn" type="button" onclick={() => openLink(PROFILE_URL)}>{t("about.profile")}</button>
+        </div>
+        <div class="row">
+          <div class="lbl">
+            <div class="t">{t("about.license")}</div>
+            <div class="d">{t("about.licenseName")} — {t("about.licenseDesc")}</div>
+          </div>
+          <button class="btn" type="button" onclick={() => openLink(LICENSE_URL)}>{t("about.licenseOpen")}</button>
+        </div>
+      </div>
+
     {/if}
   </div>
 </div>
