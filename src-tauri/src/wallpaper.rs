@@ -23,11 +23,12 @@ use std::{
     time::Duration,
 };
 
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{BOOL, GetLastError, HWND, LPARAM, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetParent, GetSystemMetrics,
-    GetWindowRect, HWND_BOTTOM, SMTO_NORMAL, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageTimeoutW, SetParent, SetWindowPos,
+    EnumWindows, FindWindowExW, FindWindowW, GA_PARENT, GWL_STYLE, GetAncestor, GetClassNameW,
+    GetSystemMetrics, GetWindowLongW, GetWindowRect, HWND_BOTTOM, SMTO_NORMAL, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageTimeoutW,
+    SetParent, SetWindowLongW, SetWindowPos, WS_CHILD, WS_CLIPSIBLINGS, WS_POPUP,
 };
 
 fn wide(s: &str) -> Vec<u16> {
@@ -141,14 +142,29 @@ pub fn attach(raw_hwnd: isize, log: &mut Vec<String>) -> Result<(), String> {
         };
         log.push(format!("mode: {mode}; parent: {}", describe(parent)));
 
-        SetParent(hwnd, parent);
-        let now = GetParent(hwnd);
+        let previous = SetParent(hwnd, parent);
+        let err = GetLastError();
+        // NOTE: GetParent() must not be used to verify this. For a WS_POPUP
+        // window (which a decoration-less Tauri window is) it returns the
+        // *owner*, i.e. null, even when SetParent succeeded. GetAncestor with
+        // GA_PARENT returns the real parent window.
+        let now = GetAncestor(hwnd, GA_PARENT);
+        log.push(format!(
+            "SetParent: previous {}, last error {err}, parent now {}",
+            describe(previous),
+            describe(now)
+        ));
         if now != parent {
             return Err(format!(
                 "SetParent did not take effect (parent is {})",
                 describe(now)
             ));
         }
+
+        // Now that it is a child window, make the styles match (popup -> child).
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let style = (style & !WS_POPUP) | WS_CHILD | WS_CLIPSIBLINGS;
+        SetWindowLongW(hwnd, GWL_STYLE, style as i32);
 
         let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
         let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
@@ -159,7 +175,7 @@ pub fn attach(raw_hwnd: isize, log: &mut Vec<String>) -> Result<(), String> {
             0,
             width,
             height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
         );
 
         log.push(format!(
