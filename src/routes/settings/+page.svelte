@@ -8,6 +8,8 @@
   let status = $state<{ ok: boolean; message?: string } | null>(null);
   let support = $state<{ name: string; level: string }[]>([]);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let autostart = $state(false);
+  let autostartError = $state<string | null>(null);
 
   const fileName = $derived(s.videoPath?.split(/[\\/]/).pop() ?? null);
 
@@ -49,6 +51,17 @@
     save(true);
   }
 
+  async function toggleAutostart(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    try {
+      autostart = await invoke<boolean>("set_autostart", { enabled: input.checked });
+      autostartError = null;
+    } catch (err) {
+      input.checked = autostart; // revert the box to what Windows actually has
+      autostartError = String(err);
+    }
+  }
+
   onMount(() => {
     const probe = document.createElement("video");
     support = probes.map(([name, type]) => {
@@ -62,6 +75,7 @@
     let off: (() => void) | undefined;
 
     invoke<Settings>("get_settings").then((v) => (s = v));
+    invoke<boolean>("get_autostart").then((v) => (autostart = v));
     listen<{ ok: boolean; message?: string }>("wallpaper:status", (e) => {
       status = e.payload.ok && !e.payload.message ? null : e.payload;
     }).then((fn) => {
@@ -159,6 +173,17 @@
       <input type="checkbox" bind:checked={s.pauseOnBattery} onchange={() => save(true)} />
       When the PC isn't plugged in
     </label>
+  </section>
+
+  <section aria-labelledby="h-startup">
+    <h2 id="h-startup">Startup</h2>
+    <label class="check">
+      <input type="checkbox" checked={autostart} onchange={toggleAutostart} />
+      Start LiveWallpaper when I sign in to Windows
+    </label>
+    {#if autostartError}
+      <p class="msg bad" role="status">{autostartError}</p>
+    {/if}
   </section>
 
   <section aria-labelledby="h-codecs">

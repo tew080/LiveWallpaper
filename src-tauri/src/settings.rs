@@ -138,3 +138,39 @@ pub async fn pick_video(app: AppHandle, window: tauri::WebviewWindow) -> Option<
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
 }
+
+#[tauri::command]
+pub fn get_autostart(app: AppHandle) -> bool {
+    #[cfg(windows)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        app.autolaunch().is_enabled().unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        false
+    }
+}
+
+/// Returns the state actually stored in the registry after the change.
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        if enabled && cfg!(debug_assertions) {
+            // A dev build would register target\debug\*.exe, which can't work at login.
+            return Err("Start with Windows only works in an installed (release) build.".into());
+        }
+        let manager = app.autolaunch();
+        let result = if enabled { manager.enable() } else { manager.disable() };
+        result.map_err(|e| e.to_string())?;
+        manager.is_enabled().map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, enabled);
+        Err("Start with Windows is only available on Windows.".into())
+    }
+}

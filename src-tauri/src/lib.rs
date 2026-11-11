@@ -44,15 +44,26 @@ pub fn run() {
         );
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // "Start with Windows" (HKCU Run key, no admin rights needed).
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        None,
+    ));
+
+    builder
         .invoke_handler(tauri::generate_handler![
             greet,
             settings::get_settings,
             settings::set_settings,
             settings::get_runtime,
-            settings::pick_video
+            settings::pick_video,
+            settings::get_autostart,
+            settings::set_autostart
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -67,14 +78,21 @@ pub fn run() {
                 .get_webview_window("main")
                 .ok_or("window `main` not found")?;
 
-            // Embed the webview behind the desktop icons (Windows only).
+            // Embed the webview behind the desktop icons (Windows only). This
+            // retries until Explorer is ready (e.g. when started at login) and
+            // shows the window once it is attached.
             #[cfg(windows)]
+            wallpaper::attach_in_background(
+                window.clone(),
+                app.path()
+                    .app_log_dir()
+                    .ok()
+                    .map(|d| d.join("wallpaper-attach.log")),
+            );
+            #[cfg(not(windows))]
             {
-                let raw = window.hwnd()?.0 as isize;
-                wallpaper::attach(raw)?;
+                window.show()?;
             }
-
-            window.show()?;
 
             // Tray menu: settings, pause/resume, quit.
             let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
