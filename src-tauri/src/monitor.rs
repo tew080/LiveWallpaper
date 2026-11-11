@@ -72,7 +72,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let mut cloaked: u32 = 0;
         DwmGetWindowAttribute(
             hwnd,
-            DWMWA_CLOAKED,
+            DWMWA_CLOAKED as u32, // windows-sys 0.59 declares the parameter as u32
             &mut cloaked as *mut u32 as *mut c_void,
             size_of::<u32>() as u32,
         );
