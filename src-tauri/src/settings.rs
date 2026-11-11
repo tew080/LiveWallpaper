@@ -61,8 +61,20 @@ pub struct Settings {
     pub pixelate: f64,
     /// -100.0 (cool) ..= 100.0 (warm)
     pub temperature: f64,
-    /// Internal render resolution, 50.0 ..= 100.0 (% of the screen)
+    /// Internal render resolution, 50.0 ..= 150.0 (% of the screen). Above 100
+    /// is supersampling, offered for dedicated GPUs.
     pub render_scale: f64,
+    /// FSR-lite: render below screen size, then upscale (Catmull-Rom + contrast
+    /// adaptive sharpening) in a second GPU pass.
+    pub upscaler: bool,
+    /// Sharpening strength of the upscaler, 0.0 ..= 100.0
+    pub upscale_sharp: f64,
+    /// FXAA strength, 0.0 ..= 200.0 (%)
+    pub aa_amount: f64,
+    /// Glow around bright areas, 0.0 ..= 100.0
+    pub bloom: f64,
+    /// Shows the original on the left half of the screen, to judge the effects.
+    pub compare: bool,
     /// Frame limit while on battery: 0 = unchanged
     pub battery_fps: u32,
     /// "auto", "en" or "th"
@@ -104,6 +116,11 @@ impl Default for Settings {
             pixelate: 0.0,
             temperature: 0.0,
             render_scale: 100.0,
+            upscaler: false,
+            upscale_sharp: 50.0,
+            aa_amount: 150.0,
+            bloom: 0.0,
+            compare: false,
             battery_fps: 0,
             language: "auto".into(),
         }
@@ -179,7 +196,14 @@ pub fn load_early(identifier: &str) -> Settings {
 pub fn webview_args(s: &Settings) -> String {
     let mut args: Vec<&str> = vec!["--autoplay-policy=no-user-gesture-required"];
     let mut enable: Vec<&str> = Vec::new();
-    let disable: Vec<&str> = vec!["CalculateNativeWinOcclusion"];
+    // Occlusion tracking off (see above); the rest are browser services a
+    // wallpaper never uses.
+    let disable: Vec<&str> = vec![
+        "CalculateNativeWinOcclusion",
+        "Translate",
+        "MediaRouter",
+        "OptimizationHints",
+    ];
 
     if !s.gpu_acceleration {
         args.push("--disable-gpu");
@@ -198,6 +222,14 @@ pub fn webview_args(s: &Settings) -> String {
         }
     }
 
+    if s.gpu_acceleration && s.gpu_choice == "performance" {
+        // Chromium's own request for the high performance adapter, on top of
+        // the Windows per-program preference. Ignored if a build doesn't know it.
+        args.push("--force_high_performance_gpu");
+    }
+    args.push("--disable-background-networking");
+    args.push("--disable-sync");
+    args.push("--disable-default-apps");
     args.push("--disable-background-timer-throttling");
     args.push("--disable-renderer-backgrounding");
     args.push("--disable-backgrounding-occluded-windows");
@@ -258,7 +290,10 @@ pub fn set_settings(
     settings.aberration = settings.aberration.clamp(0.0, 100.0);
     settings.pixelate = settings.pixelate.clamp(0.0, 100.0);
     settings.temperature = settings.temperature.clamp(-100.0, 100.0);
-    settings.render_scale = settings.render_scale.clamp(50.0, 100.0);
+    settings.render_scale = settings.render_scale.clamp(50.0, 150.0);
+    settings.upscale_sharp = settings.upscale_sharp.clamp(0.0, 100.0);
+    settings.aa_amount = settings.aa_amount.clamp(0.0, 200.0);
+    settings.bloom = settings.bloom.clamp(0.0, 100.0);
     settings.battery_fps = match settings.battery_fps {
         15 | 24 | 30 => settings.battery_fps,
         _ => 0,

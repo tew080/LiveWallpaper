@@ -30,13 +30,24 @@
     "blur",
     "temperature",
   ] as const;
-  const EFFECT_KEYS = ["sharpen", "grain", "scanlines", "vignette", "aberration", "pixelate", "tintStrength"] as const;
+  const EFFECT_KEYS = [
+    "sharpen",
+    "grain",
+    "scanlines",
+    "vignette",
+    "aberration",
+    "pixelate",
+    "bloom",
+    "tintStrength",
+  ] as const;
   type NumKey =
     | (typeof PICTURE_KEYS)[number]
     | (typeof EFFECT_KEYS)[number]
     | "volume"
     | "speed"
-    | "renderScale";
+    | "renderScale"
+    | "aaAmount"
+    | "upscaleSharp";
 
   type Gpu = { name: string; kind: string };
 
@@ -134,6 +145,9 @@
     Object.assign(s, values);
     save(true);
   }
+
+  // A dedicated graphics card unlocks supersampling and the heavier options.
+  const dgpu = $derived((gpus ?? []).find((g) => g.kind === "discrete") ?? null);
 
   const choiceFor = (g: Gpu) => (g.kind === "discrete" ? "performance" : "power");
   // Two adapters of the same kind can't be told apart by Windows' preference; the first one is shown as chosen.
@@ -450,6 +464,9 @@
             {#if renderer && renderer.vw > 0}
               <div class="d">{t("rend.size", { vw: renderer.vw, vh: renderer.vh, cw: renderer.cw, ch: renderer.ch })}</div>
             {/if}
+            {#if renderer?.up}
+              <div class="d">{t("rend.up")}</div>
+            {/if}
             {#if noScaleHint}
               <div class="d">{t("rend.noScale")}</div>
             {/if}
@@ -480,7 +497,21 @@
           s.antiAliasing = v;
           save(true);
         })}
+        {#if s.antiAliasing}
+          {@render slider("aaAmount", t("aa.amount"), 0, 200, 5, "%")}
+        {/if}
         {@render slider("sharpen", t("sharpen"), 0, 100, 1, "%")}
+        {@render toggle("upscaler", t("up.title"), t("up.desc"), s.upscaler, (v) => {
+          s.upscaler = v;
+          save(true);
+        })}
+        {#if s.upscaler}
+          {@render slider("upscaleSharp", t("up.sharp"), 0, 100, 1, "%")}
+        {/if}
+        {@render toggle("compare", t("cmp.title"), t("cmp.desc"), s.compare, (v) => {
+          s.compare = v;
+          save(true);
+        })}
       </div>
       <p class="note">{t("quality.note")}</p>
 
@@ -491,6 +522,7 @@
         {@render slider("vignette", t("vignette"), 0, 100, 1, "%")}
         {@render slider("aberration", t("aberration"), 0, 100, 1, "%")}
         {@render slider("pixelate", t("pixelate"), 0, 100, 1, "%")}
+        {@render slider("bloom", t("bloom"), 0, 100, 1, "%")}
         <div class="row">
           <div class="lbl">
             <label class="t" for="tint-color">{t("tint.color")}</label>
@@ -560,9 +592,9 @@
             save(true);
           })}
         </div>
-        {@render slider("renderScale", t("scale.title"), 50, 100, 5, "%")}
+        {@render slider("renderScale", t("scale.title"), 50, dgpu ? 150 : 100, 5, "%")}
       </div>
-      <p class="note">{t("scale.desc")}</p>
+      <p class="note">{t("scale.desc")}{dgpu ? ` ${t("scale.super")}` : ""}</p>
 
       <h2 class="cap">{t("cap.pause")}</h2>
       <div class="card">
@@ -621,6 +653,30 @@
           <button class="btn" onclick={() => run("open_graphics_settings")}>{t("gpu.open")}</button>
         </div>
       </div>
+
+      {#if dgpu}
+        <h2 class="cap">{t("cap.dgpu")}</h2>
+        <div class="card">
+          <div class="row stack">
+            <div class="lbl">
+              <div class="d">{t("dgpu.found", { name: dgpu.name })}</div>
+              <ul class="tips">
+                <li>{t("dgpu.tip1")}</li>
+                <li>{t("dgpu.tip2")}</li>
+                <li>{t("dgpu.tip3")}</li>
+              </ul>
+            </div>
+          </div>
+          <div class="row">
+            <div class="lbl">
+              <div class="d">{s.gpuChoice === "performance" ? t("dgpu.used") : ""}</div>
+            </div>
+            {#if s.gpuChoice !== "performance"}
+              <button class="btn" onclick={() => chooseGpu("performance")}>{t("dgpu.use")}</button>
+            {/if}
+          </div>
+        </div>
+      {/if}
 
       <h2 class="cap">{t("cap.hardware")}</h2>
       <div class="card">
@@ -820,6 +876,12 @@
     font-weight: 500;
   }
   .d {
+    color: var(--muted);
+    font-size: 12.5px;
+  }
+  .tips {
+    margin: 6px 0 0;
+    padding-left: 18px;
     color: var(--muted);
     font-size: 12.5px;
   }

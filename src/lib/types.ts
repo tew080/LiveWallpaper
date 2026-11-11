@@ -46,8 +46,18 @@ export interface Settings {
   aberration: number;
   pixelate: number;
   temperature: number;
-  /** Internal render resolution, 50..100 (% of the screen). */
+  /** Internal render resolution, 50..150 (% of the screen). Above 100 = supersampling. */
   renderScale: number;
+  /** FSR-lite: render below screen size, then upscale in a second GPU pass. */
+  upscaler: boolean;
+  /** Upscaler sharpening, 0..100. */
+  upscaleSharp: number;
+  /** FXAA strength, 0..200 (%). */
+  aaAmount: number;
+  /** Glow around bright areas, 0..100. */
+  bloom: number;
+  /** Original on the left half, processed on the right, to judge the effects. */
+  compare: boolean;
   /** Frame limit used while on battery: 0 = same as above. */
   batteryFps: number;
   /** "auto" follows the system language. */
@@ -93,6 +103,11 @@ export const DEFAULT_SETTINGS: Settings = {
   pixelate: 0,
   temperature: 0,
   renderScale: 100,
+  upscaler: false,
+  upscaleSharp: 50,
+  aaAmount: 150,
+  bloom: 0,
+  compare: false,
   batteryFps: 0,
   language: "auto",
 };
@@ -143,6 +158,8 @@ export const PRESETS: { id: string; values: Partial<Settings> }[] = [
   { id: "retro", values: { scanlines: 45, aberration: 22, vignette: 35, grain: 12, saturation: 115 } },
   { id: "noir", values: { grayscale: 100, contrast: 125, vignette: 50, grain: 25 } },
   { id: "warm", values: { temperature: 40, tintColor: "#ffa65c", tintStrength: 14, vignette: 20, saturation: 108 } },
+  { id: "crisp", values: { antiAliasing: true, aaAmount: 160, sharpen: 40, contrast: 105 } },
+  { id: "glow", values: { bloom: 45, saturation: 110, contrast: 105, vignette: 15 } },
   { id: "dream", values: { blur: 1.5, brightness: 108, saturation: 120, temperature: -12, vignette: 25 } },
 ];
 

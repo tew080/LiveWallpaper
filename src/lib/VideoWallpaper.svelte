@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { createGL, type Fx, type GLRenderer, type RendererInfo } from "./gl";
+  import { createGL, type Fx, type GLRenderer, type PowerPref, type RendererInfo } from "./gl";
 
   interface Props {
     src: string;
@@ -22,6 +22,8 @@
     fx?: Fx;
     /** Internal resolution in percent of the screen, 50..100. */
     renderScale?: number;
+    /** Which GPU the WebGL context asks for (the Windows per-program choice still decides). */
+    gpuPref?: PowerPref;
     onstatus?: (ok: boolean, message?: string) => void;
     onrenderer?: (info: RendererInfo) => void;
   }
@@ -39,6 +41,7 @@
     gl = false,
     fx,
     renderScale = 100,
+    gpuPref = "default",
     onstatus,
     onrenderer,
   }: Props = $props();
@@ -72,6 +75,28 @@
   let paintNow: (() => void) | null = null;
   let resizeNow: (() => void) | null = null;
   let kind: RendererInfo["mode"] = "direct";
+  let rewatch: ((v: HTMLVideoElement) => void) | null = null;
+  let sleepCtl: ((paused: boolean) => void) | null = null;
+  let asleep = false; // GPU buffers released after a long pause
+
+  // The standby copy only holds a decoder while it is about to be needed.
+  // Clips this short keep it loaded all the time.
+  const KEEP_WARM_BELOW = 12; // seconds
+  const PRELOAD_LEAD = 4; // seconds before the hand-over
+
+  const armed = (v: HTMLVideoElement) => v.getAttribute("src") !== null;
+  function arm(v: HTMLVideoElement) {
+    if (armed(v)) return;
+    v.src = src; // starts loading
+    queueMicrotask(() => rewatch?.(v));
+  }
+  function release(v: HTMLVideoElement) {
+    v.pause();
+    if (!armed(v)) return;
+    v.removeAttribute("src");
+    v.load(); // drops the decoder and its frames
+    queueMicrotask(() => rewatch?.(v));
+  }
 
   const active = () => (cur === 0 ? a : b)!;
   const standby = () => (cur === 0 ? b : a)!;
@@ -84,13 +109,16 @@
   function report() {
     const v = a;
     const c = canvas;
+    const up = kind === "gl" && !!fx?.upscale;
+    const k = up ? clamp(fx?.scale ?? 1, 0.5, 1.5) : 1;
     onrenderer?.({
       mode: kind,
       reason: gl ? glReason : null,
       vw: v?.videoWidth ?? 0,
       vh: v?.videoHeight ?? 0,
-      cw: c?.width ?? Math.round(window.innerWidth * (window.devicePixelRatio || 1)),
-      ch: c?.height ?? Math.round(window.innerHeight * (window.devicePixelRatio || 1)),
+      cw: Math.round((c?.width ?? window.innerWidth * (window.devicePixelRatio || 1)) * k),
+      ch: Math.round((c?.height ?? window.innerHeight * (window.devicePixelRatio || 1)) * k),
+      up,
     });
   }
 
@@ -172,21 +200,27 @@
     fadeLen = isFinite(d) && d > 0 ? Math.min(Math.max(loopFade, 0) * rate, d / 3) : 0;
     fading = true;
     mix = 0;
+    arm(y); // normally already loaded; this only matters if the hand-over came early
     if (Math.abs(y.currentTime) > 0.01) y.currentTime = 0;
     void play(y, false);
   }
 
   function finishTransition() {
     const old = active();
+    const warm = isFinite(old.duration) && old.duration < KEEP_WARM_BELOW;
     cur = 1 - cur;
     fading = false;
     mix = 0;
     lastMedia = -1;
     old.pause();
-    try {
-      old.currentTime = 0; // becomes the standby: decodes its first frame now
-    } catch {
-      /* not seekable yet */
+    if (warm) {
+      try {
+        old.currentTime = 0; // becomes the standby: decodes its first frame now
+      } catch {
+        /* not seekable yet */
+      }
+    } else {
+      release(old); // long clip: the decoder is freed until the next hand-over
     }
     layout();
     applyAudio();
@@ -205,7 +239,9 @@
       // Start the next copy early enough to cover the seam: the whole fade for
       // a crossfade, or about two frames for a seamless hand-off.
       const lead = fade > 0 ? fade : Math.max(0.05, frameDur * 2);
-      if (d - x.currentTime <= lead && y.readyState >= 2) startTransition();
+      const remain = d - x.currentTime;
+      if (d < KEEP_WARM_BELOW || remain <= lead + PRELOAD_LEAD * rate) arm(y);
+      if (remain <= lead && y.readyState >= 2) startTransition();
       return;
     }
 
@@ -241,6 +277,7 @@
       forcedMute = false;
       frameDur = 1 / 30;
       lastMedia = -1;
+      release(y); // the standby is loaded again shortly before the end of the clip
       x.disablePictureInPicture = y.disablePictureInPicture = true;
       x.disableRemotePlayback = y.disableRemotePlayback = true;
       layout();
@@ -278,7 +315,14 @@
 
   $effect(() => {
     void renderScale;
+    void fx?.upscale;
+    void fx?.scale;
     resizeNow?.();
+  });
+
+  // Long pause (e.g. a window covers the wallpaper): free the GPU buffers.
+  $effect(() => {
+    sleepCtl?.(paused);
   });
 
   // Turning the shader off and on again gives it another try.
@@ -322,7 +366,7 @@
     let ctx: CanvasRenderingContext2D | null = null;
     if (c && wantGL) {
       try {
-        renderer = createGL(c);
+        renderer = createGL(c, gpuPref);
       } catch (e) {
         glReason = e instanceof Error ? e.message : String(e);
         return; // the canvas is replaced and this effect runs again with the 2D path
@@ -357,7 +401,7 @@
     };
 
     const paint2d = () => {
-      if (!ctx || !c) return;
+      if (!ctx || !c || asleep) return;
       if (fit !== "cover") {
         ctx.globalAlpha = 1;
         ctx.fillStyle = "#000";
@@ -369,7 +413,7 @@
     };
 
     const paintGL = () => {
-      if (!renderer || !c || !fx) return;
+      if (!renderer || !c || !fx || asleep) return;
       const px = c.width / Math.max(1, window.innerWidth);
       try {
         if (renderer.draw(active(), fit, fx, 1, px) && fading && mix > 0) {
@@ -384,9 +428,11 @@
     const paint = renderer ? paintGL : paint2d;
 
     const resize = () => {
-      if (!c) return;
+      if (!c || asleep) return;
       const dpr = Math.min(window.devicePixelRatio || 1, 4);
-      const k = clamp(renderScale, 50, 100) / 100;
+      // With the upscaler the canvas keeps the screen size and the shader's own
+      // target gets the render scale; otherwise the canvas itself is scaled.
+      const k = renderer && fx?.upscale ? 1 : clamp(renderScale, 50, 150) / 100;
       c.width = Math.max(1, Math.floor(window.innerWidth * dpr * k));
       c.height = Math.max(1, Math.floor(window.innerHeight * dpr * k));
       paint();
@@ -418,6 +464,32 @@
       handles.set(v, v.requestVideoFrameCallback(cb));
     };
 
+    let sleepTimer = 0;
+    const SLEEP_AFTER = 30_000;
+    sleepCtl = (p) => {
+      clearTimeout(sleepTimer);
+      if (!c) return;
+      if (p) {
+        sleepTimer = window.setTimeout(() => {
+          if (asleep) return;
+          asleep = true;
+          renderer?.release();
+          c.width = 1;
+          c.height = 1;
+        }, SLEEP_AFTER);
+      } else if (asleep) {
+        asleep = false;
+        resize();
+      }
+    };
+
+    rewatch = (v) => {
+      if (stopped) return;
+      const h = handles.get(v);
+      if (h !== undefined) v.cancelVideoFrameCallback(h);
+      watch(v);
+    };
+
     if (capped) {
       paintNow = paint;
       resizeNow = resize;
@@ -427,9 +499,14 @@
     }
     watch(x);
     watch(y);
+    untrack(() => sleepCtl?.(paused));
 
     return () => {
       stopped = true;
+      clearTimeout(sleepTimer);
+      sleepCtl = null;
+      rewatch = null;
+      asleep = false;
       for (const [v, h] of handles) v.cancelVideoFrameCallback(h);
       window.removeEventListener("resize", resize);
       c?.removeEventListener("webglcontextlost", onLost);
@@ -455,7 +532,6 @@
 ></video>
 <video
   bind:this={b}
-  {src}
   class:direct
   style:object-fit={fit}
   playsinline

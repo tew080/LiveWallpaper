@@ -29,6 +29,12 @@
   const fx = $derived<Fx>({
     smooth: settings.smoothScaling,
     aa: settings.antiAliasing,
+    aaAmount: settings.aaAmount,
+    upscale: settings.upscaler,
+    upSharp: settings.upscaleSharp,
+    scale: settings.renderScale / 100,
+    bloom: settings.bloom,
+    compare: settings.compare,
     sharpen: settings.sharpen,
     aberration: settings.aberration,
     pixelate: settings.pixelate,
@@ -48,6 +54,9 @@
   const wantGL = $derived(
     settings.smoothScaling ||
       settings.antiAliasing ||
+      settings.upscaler ||
+      settings.bloom > 0 ||
+      settings.compare ||
       settings.sharpen > 0 ||
       settings.aberration > 0 ||
       settings.pixelate > 0 ||
@@ -171,6 +180,11 @@
       gl={wantGL}
       {fx}
       renderScale={settings.renderScale}
+      gpuPref={settings.gpuChoice === "performance"
+        ? "high-performance"
+        : settings.gpuChoice === "power"
+          ? "low-power"
+          : "default"}
       {paused}
       {onstatus}
       {onrenderer}
